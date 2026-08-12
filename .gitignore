@@ -10,3 +10,5 @@ build/
 .env
 .env.*
 !.env.example
+integration/*/results/*
+!integration/*/results/.gitkeep

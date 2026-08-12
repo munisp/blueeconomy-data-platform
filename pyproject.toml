@@ -9,6 +9,7 @@ description = "Governed real-input lakehouse ingestion for the Blue Economy Plat
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "confluent-kafka==2.15.0",
   "deltalake==1.6.2",
   "jsonschema==4.26.0",
   "pyarrow==25.0.1",
@@ -20,11 +21,13 @@ dev = [
   "mypy==1.17.1",
   "pytest==9.0.3",
   "ruff==0.12.11",
+  "types-confluent-kafka==1.4.1",
   "types-jsonschema==4.26.0.20260518",
 ]
 
 [project.scripts]
 blueeconomy-ingest-events = "blueeconomy_data_platform.ingest:main"
+blueeconomy-ingest-kafka = "blueeconomy_data_platform.kafka_ingest:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blueeconomy_data_platform"]
