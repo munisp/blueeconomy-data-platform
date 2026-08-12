@@ -53,6 +53,29 @@ def test_real_local_delta_ingestion_is_idempotent(tmp_path: Path) -> None:
     assert DeltaTable(table_path).to_pyarrow_table().num_rows == 1
 
 
+def test_rejects_conflicting_event_id_reuse(tmp_path: Path) -> None:
+    input_path = tmp_path / "events.ndjson"
+    first = valid_event()
+    write_ndjson(input_path, [first])
+    events = read_and_validate_events(input_path, load_schema(schema_path()))
+    table_path = str(tmp_path / "delta-events")
+    append_events(table_path, events)
+
+    second = valid_event()
+    second["payload"] = {"integrity_status": "failed"}
+    write_ndjson(input_path, [second])
+    conflicting = read_and_validate_events(input_path, load_schema(schema_path()))
+    try:
+        append_events(table_path, conflicting)
+    except ValueError as error:
+        assert "event_id reuse conflicts" in str(error)
+    else:
+        raise AssertionError("conflicting event ID reuse was accepted")
+
+    retained = DeltaTable(table_path).to_pyarrow_table().to_pylist()
+    assert retained[0]["payload_json"] == '{"integrity_status":"verified"}'
+
+
 def test_rejects_recorded_time_before_occurrence() -> None:
     event = valid_event()
     event["recorded_at"] = "2026-08-11T23:59:59Z"

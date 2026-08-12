@@ -231,6 +231,42 @@ def validate_table_uri(table_uri: str) -> None:
         )
 
 
+EVENT_IDENTITY_COLUMNS = (
+    "event_id",
+    "event_type",
+    "producer",
+    "occurred_at",
+    "recorded_at",
+    "data_classification",
+    "source_system",
+    "source_record_reference",
+    "correlation_id",
+    "payload_json",
+)
+
+
+def reject_conflicting_event_replays(table: DeltaTable, events: list[dict[str, Any]]) -> None:
+    event_ids = [str(event["event_id"]) for event in events]
+    existing_rows = table.to_pyarrow_table(
+        columns=list(EVENT_IDENTITY_COLUMNS),
+        filters=[("event_id", "in", event_ids)],
+    ).to_pylist()
+    existing_by_id = {str(row["event_id"]): row for row in existing_rows}
+    conflicts: list[str] = []
+    for event in events:
+        event_id = str(event["event_id"])
+        existing = existing_by_id.get(event_id)
+        if existing is None:
+            continue
+        if any(existing[column] != event[column] for column in EVENT_IDENTITY_COLUMNS):
+            conflicts.append(event_id)
+    if conflicts:
+        raise ValueError(
+            "event_id reuse conflicts with retained immutable content: "
+            + ", ".join(sorted(conflicts))
+        )
+
+
 def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, int, int]:
     validate_table_uri(table_uri)
     arrow_table = pa.Table.from_pylist(events)
@@ -249,6 +285,7 @@ def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, in
         table = DeltaTable(table_uri)
         if table.metadata().configuration.get("delta.appendOnly") != "true":
             raise ValueError("existing Delta table is not configured with delta.appendOnly=true")
+        reject_conflicting_event_replays(table, events)
         try:
             metrics = (
                 table.merge(
@@ -261,8 +298,10 @@ def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, in
                 .execute()
             )
             records_written = int(metrics["num_target_rows_inserted"])
+            retained = DeltaTable(table_uri)
+            reject_conflicting_event_replays(retained, events)
             return (
-                DeltaTable(table_uri).version(),
+                retained.version(),
                 records_written,
                 len(events) - records_written,
             )
