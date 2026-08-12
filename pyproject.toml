@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blueeconomy-data-platform"
+version = "0.1.0"
+description = "Governed real-input lakehouse ingestion for the Blue Economy Platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "deltalake==1.6.2",
+  "jsonschema==4.26.0",
+  "pyarrow==25.0.1",
+]
+
+[project.scripts]
+blueeconomy-ingest-events = "blueeconomy_data_platform.ingest:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blueeconomy_data_platform"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

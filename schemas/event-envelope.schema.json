@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/munisp/blueeconomy-contracts/schemas/event-envelope.schema.json",
+  "title": "Blue Economy Lakehouse Event Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "producer",
+    "occurred_at",
+    "recorded_at",
+    "data_classification",
+    "source_system",
+    "source_record_reference",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{2,127}$"
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data_classification": {
+      "type": "string",
+      "enum": ["public", "internal", "confidential", "restricted", "highly_restricted"]
+    },
+    "source_system": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "source_record_reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
