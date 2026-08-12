@@ -8,18 +8,26 @@ envelope schema before writing an append-only Delta table.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+from urllib.parse import urlsplit
 
 import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
+from deltalake.exceptions import CommitFailedError, TableNotFoundError
 from jsonschema import Draft202012Validator, FormatChecker
 
 MAX_RECORDS_PER_BATCH = 100_000
+MAX_INPUT_BYTES = 256 * 1024 * 1024
+MAX_LINE_BYTES = 2 * 1024 * 1024
+MAX_PAYLOAD_JSON_BYTES = 1024 * 1024
+MAX_COMMIT_ATTEMPTS = 3
 EVENT_TABLE_DESCRIPTION = "Governed append-only Blue Economy Platform event envelope table"
 
 
@@ -28,10 +36,11 @@ class IngestionReport:
     schema_version: str
     started_at: str
     completed_at: str
-    input_path: str
-    table_uri: str
+    input_sha256: str
+    table_reference_sha256: str
     records_received: int
     records_written: int
+    records_already_present: int
     source_systems: list[str]
     data_classifications: list[str]
     table_version: int
@@ -68,42 +77,60 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def load_schema(path: Path) -> Draft202012Validator:
-    if not path.is_file():
-        raise ValueError(f"schema path does not identify a readable file: {path}")
+    require_regular_file(path, "schema", MAX_LINE_BYTES)
     with path.open("r", encoding="utf-8") as handle:
-        schema = json.load(handle)
+        schema = json.load(handle, parse_constant=reject_non_finite_constant)
     Draft202012Validator.check_schema(schema)
     return Draft202012Validator(schema, format_checker=FormatChecker())
 
 
-def read_and_validate_events(input_path: Path, validator: Draft202012Validator) -> list[dict[str, Any]]:
-    if not input_path.is_file():
-        raise ValueError(f"input path does not identify a readable file: {input_path}")
+def read_and_validate_events(
+    input_path: Path, validator: Draft202012Validator
+) -> list[dict[str, Any]]:
+    require_regular_file(input_path, "input", MAX_INPUT_BYTES)
 
     events: list[dict[str, Any]] = []
     event_ids: set[str] = set()
-    with input_path.open("r", encoding="utf-8") as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
-            if not line:
+    with input_path.open("rb") as handle:
+        line_number = 0
+        while True:
+            raw_line = handle.readline(MAX_LINE_BYTES + 1)
+            if not raw_line:
+                break
+            line_number += 1
+            if len(raw_line) > MAX_LINE_BYTES:
+                raise ValueError(f"input line {line_number} exceeds {MAX_LINE_BYTES} bytes")
+            if not raw_line.strip():
                 continue
             try:
-                event = json.loads(line)
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"input line {line_number} is not valid UTF-8") from error
+            try:
+                event = json.loads(line, parse_constant=reject_non_finite_constant)
             except json.JSONDecodeError as error:
-                raise ValueError(f"input line {line_number} is not valid JSON: {error.msg}") from error
+                raise ValueError(
+                    f"input line {line_number} is not valid JSON: {error.msg}"
+                ) from error
             if not isinstance(event, dict):
                 raise ValueError(f"input line {line_number} must be a JSON object")
-            validation_errors = sorted(validator.iter_errors(event), key=lambda item: list(item.path))
+            validation_errors = sorted(
+                validator.iter_errors(event), key=lambda item: list(item.path)
+            )
             if validation_errors:
                 messages = "; ".join(error.message for error in validation_errors)
-                raise ValueError(f"input line {line_number} fails event-envelope validation: {messages}")
-            event_id = event["event_id"]
+                raise ValueError(
+                    f"input line {line_number} fails event-envelope validation: {messages}"
+                )
+            event_id = require_canonical_text(event["event_id"], "event_id", 256)
             if event_id in event_ids:
                 raise ValueError(f"input contains duplicate event_id {event_id!r}")
             event_ids.add(event_id)
             events.append(normalize_event(event))
             if len(events) > MAX_RECORDS_PER_BATCH:
-                raise ValueError(f"input exceeds the maximum batch size of {MAX_RECORDS_PER_BATCH} records")
+                raise ValueError(
+                    f"input exceeds the maximum batch size of {MAX_RECORDS_PER_BATCH} records"
+                )
 
     if not events:
         raise ValueError("input contains no event records")
@@ -112,22 +139,39 @@ def read_and_validate_events(input_path: Path, validator: Draft202012Validator) 
 
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     """Create a stable Arrow-compatible row while retaining the original approved payload."""
+    occurred_at = parse_timestamp(event["occurred_at"], "occurred_at")
+    recorded_at = parse_timestamp(event["recorded_at"], "recorded_at")
+    if occurred_at > recorded_at:
+        raise ValueError("occurred_at must not be later than recorded_at")
+
+    payload_json = canonical_json(event["payload"])
+    if len(payload_json.encode("utf-8")) > MAX_PAYLOAD_JSON_BYTES:
+        raise ValueError(f"payload exceeds {MAX_PAYLOAD_JSON_BYTES} canonical JSON bytes")
+
+    correlation_id = event.get("correlation_id")
+    if correlation_id is not None:
+        correlation_id = require_canonical_text(correlation_id, "correlation_id", 256)
+
     return {
-        "event_id": event["event_id"],
-        "event_type": event["event_type"],
-        "producer": event["producer"],
-        "occurred_at": parse_timestamp(event["occurred_at"], "occurred_at"),
-        "recorded_at": parse_timestamp(event["recorded_at"], "recorded_at"),
+        "event_id": require_canonical_text(event["event_id"], "event_id", 256),
+        "event_type": require_canonical_text(event["event_type"], "event_type", 128),
+        "producer": require_canonical_text(event["producer"], "producer", 256),
+        "occurred_at": occurred_at,
+        "recorded_at": recorded_at,
         "data_classification": event["data_classification"],
-        "source_system": event["source_system"],
-        "source_record_reference": event["source_record_reference"],
-        "correlation_id": event.get("correlation_id"),
-        "payload_json": canonical_json(event["payload"]),
+        "source_system": require_canonical_text(event["source_system"], "source_system", 256),
+        "source_record_reference": require_canonical_text(
+            event["source_record_reference"], "source_record_reference", 512
+        ),
+        "correlation_id": correlation_id,
+        "payload_json": payload_json,
         "ingested_at": datetime.now(UTC),
     }
 
 
 def parse_timestamp(value: str, field_name: str) -> datetime:
+    if not isinstance(value, str) or "T" not in value:
+        raise ValueError(f"{field_name} must be an RFC 3339 timestamp")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
@@ -138,55 +182,94 @@ def parse_timestamp(value: str, field_name: str) -> datetime:
 
 
 def canonical_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
-def existing_duplicate_ids(table_uri: str, event_ids: set[str]) -> set[str]:
-    if not delta_table_exists(table_uri):
-        return set()
-    table = DeltaTable(table_uri)
-    configuration = table.metadata().configuration
-    if configuration.get("delta.appendOnly") != "true":
-        raise ValueError("existing Delta table is not configured with delta.appendOnly=true")
+def require_canonical_text(value: Any, field_name: str, limit: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > limit
+        or has_control_characters(value)
+    ):
+        raise ValueError(
+            f"{field_name} must be canonical non-control text of at most {limit} UTF-8 bytes"
+        )
+    return value
 
-    duplicates: set[str] = set()
-    sorted_ids = sorted(event_ids)
-    for index in range(0, len(sorted_ids), 1_000):
-        candidate_ids = sorted_ids[index : index + 1_000]
-        existing = table.to_pyarrow_table(columns=["event_id"], filters=[("event_id", "in", candidate_ids)])
-        duplicates.update(existing.column("event_id").to_pylist())
-    return duplicates
+
+def reject_non_finite_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value!r} is not permitted")
+
+
+def has_control_characters(value: str) -> bool:
+    return any(unicodedata.category(character).startswith("C") for character in value)
 
 
 def delta_table_exists(table_uri: str) -> bool:
-    """Determine existence without accepting a URI that the process cannot read."""
     try:
         DeltaTable(table_uri, without_files=True)
-    except Exception as error:  # Delta Lake supplies multiple backend-specific error types.
-        message = str(error).lower()
-        if "not a delta table" in message or "no such file" in message or "not found" in message:
-            return False
-        raise RuntimeError(f"cannot open Delta table URI {table_uri!r}: {error}") from error
+    except TableNotFoundError:
+        return False
     return True
 
 
-def append_events(table_uri: str, events: list[dict[str, Any]]) -> int:
-    duplicate_ids = existing_duplicate_ids(table_uri, {event["event_id"] for event in events})
-    if duplicate_ids:
-        sample = ", ".join(sorted(duplicate_ids)[:10])
-        raise ValueError(f"refusing to append duplicate event_id values: {sample}")
+def validate_table_uri(table_uri: str) -> None:
+    if not table_uri or table_uri != table_uri.strip() or has_control_characters(table_uri):
+        raise ValueError("table URI must be canonical non-control text")
+    parsed = urlsplit(table_uri)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError(
+            "table URI must not contain embedded credentials, query parameters or fragments"
+        )
 
+
+def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, int, int]:
+    validate_table_uri(table_uri)
     arrow_table = pa.Table.from_pylist(events)
-    table_exists = delta_table_exists(table_uri)
-    write_deltalake(
-        table_uri,
-        arrow_table,
-        mode="append" if table_exists else "error",
-        name="blueeconomy_event_envelope",
-        description=EVENT_TABLE_DESCRIPTION,
-        configuration={"delta.appendOnly": "true"} if not table_exists else None,
-    )
-    return DeltaTable(table_uri).version()
+    if not delta_table_exists(table_uri):
+        write_deltalake(
+            table_uri,
+            arrow_table,
+            mode="error",
+            name="blueeconomy_event_envelope",
+            description=EVENT_TABLE_DESCRIPTION,
+            configuration={"delta.appendOnly": "true"},
+        )
+        return DeltaTable(table_uri).version(), len(events), 0
+
+    for attempt in range(1, MAX_COMMIT_ATTEMPTS + 1):
+        table = DeltaTable(table_uri)
+        if table.metadata().configuration.get("delta.appendOnly") != "true":
+            raise ValueError("existing Delta table is not configured with delta.appendOnly=true")
+        try:
+            metrics = (
+                table.merge(
+                    source=arrow_table,
+                    predicate="target.event_id = source.event_id",
+                    source_alias="source",
+                    target_alias="target",
+                )
+                .when_not_matched_insert_all()
+                .execute()
+            )
+            records_written = int(metrics["num_target_rows_inserted"])
+            return (
+                DeltaTable(table_uri).version(),
+                records_written,
+                len(events) - records_written,
+            )
+        except CommitFailedError:
+            if attempt == MAX_COMMIT_ATTEMPTS:
+                raise
+    raise RuntimeError("Delta commit retry loop exhausted unexpectedly")
 
 
 def write_report(path: Path, report: IngestionReport) -> None:
@@ -197,21 +280,57 @@ def write_report(path: Path, report: IngestionReport) -> None:
     temporary.replace(path)
 
 
+def require_regular_file(path: Path, label: str, maximum_bytes: int) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise ValueError(f"{label} path does not identify a readable file") from error
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} path must be a regular file and not a symbolic link")
+    if metadata.st_size <= 0 or metadata.st_size > maximum_bytes:
+        raise ValueError(f"{label} file must contain between 1 and {maximum_bytes} bytes")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def reference_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def validate_output_path(input_path: Path, schema_path: Path, report_path: Path) -> None:
+    report_resolved = report_path.resolve(strict=False)
+    if report_resolved in {
+        input_path.resolve(strict=False),
+        schema_path.resolve(strict=False),
+    }:
+        raise ValueError("report path must not overwrite the input or schema file")
+
+
 def main() -> None:
     arguments = parse_arguments()
     started_at = datetime.now(UTC)
     try:
+        validate_output_path(arguments.input, arguments.schema, arguments.report)
         validator = load_schema(arguments.schema)
         events = read_and_validate_events(arguments.input, validator)
-        table_version = append_events(arguments.table_uri, events)
+        table_version, records_written, records_already_present = append_events(
+            arguments.table_uri, events
+        )
         report = IngestionReport(
-            schema_version="blueeconomy.lakehouse.ingestion-report.v1",
+            schema_version="blueeconomy.lakehouse.ingestion-report.v2",
             started_at=started_at.isoformat(),
             completed_at=datetime.now(UTC).isoformat(),
-            input_path=str(arguments.input),
-            table_uri=arguments.table_uri,
+            input_sha256=file_sha256(arguments.input),
+            table_reference_sha256=reference_sha256(arguments.table_uri),
             records_received=len(events),
-            records_written=len(events),
+            records_written=records_written,
+            records_already_present=records_already_present,
             source_systems=sorted({event["source_system"] for event in events}),
             data_classifications=sorted({event["data_classification"] for event in events}),
             table_version=table_version,
