@@ -29,6 +29,10 @@ The v2 file-ingestion report contains record counts, already-present counts, sou
 
 For Kafka ingestion, `--bootstrap-servers`, `--topic`, `--group-id`, `--security-protocol`, `--max-messages`, `--table-uri`, `--schema` and `--report` are mandatory. `PLAINTEXT` is accepted only for explicit loopback integration runs; non-local execution requires `SSL` or `SASL_SSL`, CA material and environment-injected SASL credentials where applicable. The proven local Apache Kafka-to-Delta path is documented in [`integration/kafka-delta`](integration/kafka-delta/README.md).
 
+## S2 GeoJSON geofence evaluation
+
+`blueeconomy_data_platform.geofence` provides a real, dependency-free evaluator for validated WGS84 GeoJSON `Polygon` and `MultiPolygon` boundaries. It validates finite longitude/latitude ranges, closed linear rings, holes, boundary points and multipolygon membership, and rejects unsupported geometry rather than silently approximating it. It is suitable for deterministic local event classification and test evidence. It does not replace Sedona/PostGIS geospatial storage, geodesic/antimeridian handling or a Ministry-approved geofence source; those remain target-deployment requirements.
+
 ## Integrity and operational boundaries
 
 The implementation enforces bounded files, bounded lines, bounded canonical payloads, finite JSON values, canonical text identifiers, `occurred_at <= recorded_at`, unique IDs within a batch and Delta insert-only idempotency. New-table creation and existing-table merge use the actual pinned Delta Lake library.
