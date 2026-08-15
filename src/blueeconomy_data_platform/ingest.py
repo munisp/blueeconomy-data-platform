@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 import unicodedata
 from dataclasses import asdict, dataclass
@@ -145,6 +146,8 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("occurred_at must not be later than recorded_at")
 
     payload_json = canonical_json(event["payload"])
+    if event["event_type"] == "maritime.position.v1":
+        validate_maritime_position(event["payload"])
     if len(payload_json.encode("utf-8")) > MAX_PAYLOAD_JSON_BYTES:
         raise ValueError(f"payload exceeds {MAX_PAYLOAD_JSON_BYTES} canonical JSON bytes")
 
@@ -167,6 +170,39 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         "payload_json": payload_json,
         "ingested_at": datetime.now(UTC),
     }
+
+
+def validate_maritime_position(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("maritime.position.v1 payload must be an object")
+    required = {"asset_id", "latitude", "longitude", "speed_knots", "heading_degrees"}
+    missing = required.difference(payload)
+    if missing:
+        raise ValueError(f"maritime.position.v1 payload is missing fields: {sorted(missing)}")
+    asset_id = require_canonical_text(payload["asset_id"], "asset_id", 256)
+    if not asset_id:
+        raise ValueError("asset_id must be non-empty")
+    latitude = payload["latitude"]
+    longitude = payload["longitude"]
+    speed_knots = payload["speed_knots"]
+    heading_degrees = payload["heading_degrees"]
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (latitude, longitude, speed_knots, heading_degrees)
+    ):
+        raise ValueError("maritime position coordinates and motion values must be finite numbers")
+    if not all(
+        math.isfinite(float(value)) for value in (latitude, longitude, speed_knots, heading_degrees)
+    ):
+        raise ValueError("maritime position coordinates and motion values must be finite numbers")
+    if not -90.0 <= float(latitude) <= 90.0:
+        raise ValueError("latitude must be between -90 and 90 degrees")
+    if not -180.0 <= float(longitude) <= 180.0:
+        raise ValueError("longitude must be between -180 and 180 degrees")
+    if float(speed_knots) < 0:
+        raise ValueError("speed_knots must not be negative")
+    if not 0.0 <= float(heading_degrees) < 360.0:
+        raise ValueError("heading_degrees must be in the range [0, 360)")
 
 
 def parse_timestamp(value: str, field_name: str) -> datetime:

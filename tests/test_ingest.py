@@ -10,6 +10,7 @@ from blueeconomy_data_platform.ingest import (
     load_schema,
     normalize_event,
     read_and_validate_events,
+    validate_maritime_position,
     validate_output_path,
     validate_table_uri,
 )
@@ -74,6 +75,52 @@ def test_rejects_conflicting_event_id_reuse(tmp_path: Path) -> None:
 
     retained = DeltaTable(table_path).to_pyarrow_table().to_pylist()
     assert retained[0]["payload_json"] == '{"integrity_status":"verified"}'
+
+
+def test_accepts_valid_maritime_position_payload() -> None:
+    event = valid_event()
+    event["event_type"] = "maritime.position.v1"
+    event["payload"] = {
+        "asset_id": "vessel-001",
+        "latitude": 6.45,
+        "longitude": 3.39,
+        "speed_knots": 8.5,
+        "heading_degrees": 270.0,
+    }
+    normalized = normalize_event(event)
+    assert normalized["event_type"] == "maritime.position.v1"
+
+
+def test_rejects_out_of_range_maritime_position() -> None:
+    payload = {
+        "asset_id": "vessel-001",
+        "latitude": 91.0,
+        "longitude": 3.39,
+        "speed_knots": 8.5,
+        "heading_degrees": 270.0,
+    }
+    try:
+        validate_maritime_position(payload)
+    except ValueError as error:
+        assert "latitude must be between" in str(error)
+    else:
+        raise AssertionError("out-of-range maritime latitude was accepted")
+
+
+def test_rejects_negative_maritime_speed() -> None:
+    payload = {
+        "asset_id": "vessel-001",
+        "latitude": 6.45,
+        "longitude": 3.39,
+        "speed_knots": -1.0,
+        "heading_degrees": 270.0,
+    }
+    try:
+        validate_maritime_position(payload)
+    except ValueError as error:
+        assert "speed_knots must not be negative" in str(error)
+    else:
+        raise AssertionError("negative maritime speed was accepted")
 
 
 def test_rejects_recorded_time_before_occurrence() -> None:
