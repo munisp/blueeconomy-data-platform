@@ -1,0 +1,31 @@
+name: Repository Governance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-governance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    name: Repository Governance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify version-controlled governance controls
+        run: |
+          set -euo pipefail
+          test -s .github/CODEOWNERS
+          test -s .github/branch-protection.main.json
+          grep -Fq 'required_approving_review_count' .github/branch-protection.main.json
+          grep -Fq 'require_code_owner_reviews' .github/branch-protection.main.json
+          grep -Fq 'allow_force_pushes' .github/branch-protection.main.json

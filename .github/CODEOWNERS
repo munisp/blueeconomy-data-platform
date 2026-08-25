@@ -1,0 +1,14 @@
+# Branch protection requires a review from this repository owner for every protected-path change.
+* @munisp
+
+# Governance, delivery, identity, financial, security, and production configuration changes require owner review.
+/.github/ @munisp
+/governance/ @munisp
+/policies/ @munisp
+/kubernetes/ @munisp
+/charts/ @munisp
+/infra/ @munisp
+/config/ @munisp
+/server/ @munisp
+/cmd/ @munisp
+/internal/ @munisp

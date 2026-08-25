@@ -18,7 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "bandit==1.8.6",
+  "hatchling==1.28.0",
   "mypy==1.17.1",
+  "pip-audit==2.10.1",
   "pytest==9.0.3",
   "ruff==0.12.11",
   "types-confluent-kafka==1.4.1",
