@@ -40,7 +40,14 @@
     },
     "data_classification": {
       "type": "string",
-      "enum": ["public", "internal", "confidential", "restricted", "highly_restricted"]
+      "enum": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted",
+        "highly_restricted",
+        "fiduciary_segregated"
+      ]
     },
     "source_system": {
       "type": "string",

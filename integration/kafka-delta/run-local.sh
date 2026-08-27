@@ -31,7 +31,7 @@ for _ in $(seq 1 120); do
 done
 "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:59092 >/dev/null
 
-readonly topic="blueeconomy.events.local"
+readonly topic="ports.events.local"
 "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server 127.0.0.1:59092 \
   --create --if-not-exists --topic "$topic" --partitions 1 --replication-factor 1
@@ -54,6 +54,7 @@ for ordinal in first second; do
     --allow-insecure-localhost \
     --max-messages 1 \
     --idle-timeout-seconds 20 \
+    --lakehouse-scope platform \
     --table-uri "$table" \
     --schema "$root/schemas/event-envelope.schema.json" \
     --report "$work/$ordinal-report.json" \

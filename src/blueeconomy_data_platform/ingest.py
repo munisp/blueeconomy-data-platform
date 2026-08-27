@@ -303,16 +303,25 @@ def reject_conflicting_event_replays(table: DeltaTable, events: list[dict[str, A
         )
 
 
-def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, int, int]:
+def append_events(
+    table_uri: str,
+    events: list[dict[str, Any]],
+    table_description: str | None = None,
+) -> tuple[int, int, int]:
     validate_table_uri(table_uri)
     arrow_table = pa.Table.from_pylist(events)
     if not delta_table_exists(table_uri):
+        description = EVENT_TABLE_DESCRIPTION
+        if table_description is not None:
+            if not table_description or table_description != table_description.strip():
+                raise ValueError("table description must be canonical non-empty text")
+            description = table_description
         write_deltalake(
             table_uri,
             arrow_table,
             mode="error",
             name="blueeconomy_event_envelope",
-            description=EVENT_TABLE_DESCRIPTION,
+            description=description,
             configuration={"delta.appendOnly": "true"},
         )
         return DeltaTable(table_uri).version(), len(events), 0

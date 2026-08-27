@@ -78,3 +78,33 @@ def test_report_cannot_overwrite_schema(tmp_path: Path) -> None:
     schema.write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="must not overwrite"):
         validate_report_path(schema, schema)
+
+
+def test_lakehouse_scope_flag_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    from blueeconomy_data_platform.kafka_ingest import parse_arguments
+
+    argv = [
+        "blueeconomy-ingest-kafka",
+        "--bootstrap-servers",
+        "127.0.0.1:59092",
+        "--topic",
+        "cvff.ledger.commitments",
+        "--group-id",
+        "local",
+        "--security-protocol",
+        "PLAINTEXT",
+        "--allow-insecure-localhost",
+        "--max-messages",
+        "1",
+        "--table-uri",
+        "/lakehouse/cvff/cvff_bronze/events",
+        "--schema",
+        "schemas/event-envelope.schema.json",
+        "--report",
+        "/tmp/report.json",
+    ]
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(SystemExit):
+        parse_arguments()
+    monkeypatch.setattr("sys.argv", [*argv, "--lakehouse-scope", "cvff"])
+    assert parse_arguments().lakehouse_scope == "cvff"

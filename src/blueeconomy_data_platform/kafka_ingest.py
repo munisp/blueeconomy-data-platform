@@ -25,6 +25,12 @@ from blueeconomy_data_platform.ingest import (
     reject_non_finite_constant,
     require_canonical_text,
 )
+from blueeconomy_data_platform.segregation import (
+    LakehouseScope,
+    enforce_event_scope,
+    enforce_topic_scope,
+    require_scope_table_uri,
+)
 
 TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,248}$")
 LOCAL_BOOTSTRAP = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}$")
@@ -39,6 +45,7 @@ class KafkaIngestionReport:
     bootstrap_reference_sha256: str
     consumer_group_sha256: str
     topic: str
+    lakehouse_scope: str
     messages_received: int
     records_written: int
     records_already_present: int
@@ -66,6 +73,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--allow-insecure-localhost", action="store_true")
     parser.add_argument("--max-messages", required=True, type=int)
     parser.add_argument("--idle-timeout-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--lakehouse-scope",
+        required=True,
+        choices=("platform", "cvff"),
+        help="Segregated lakehouse scope this consumer is authorized to write.",
+    )
     parser.add_argument("--table-uri", required=True)
     parser.add_argument("--schema", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
@@ -234,6 +247,9 @@ def main() -> None:
     consumer: Consumer | None = None
     try:
         validate_report_path(arguments.schema, arguments.report)
+        scope = LakehouseScope(arguments.lakehouse_scope)
+        enforce_topic_scope(arguments.topic, scope)
+        require_scope_table_uri(scope, arguments.table_uri)
         configuration = validate_transport(arguments)
         validator = load_schema(arguments.schema)
         consumer = Consumer(configuration)
@@ -244,6 +260,7 @@ def main() -> None:
             arguments.max_messages,
             arguments.idle_timeout_seconds,
         )
+        enforce_event_scope(events, scope)
         table_version, records_written, records_already_present = append_events(
             arguments.table_uri, events
         )
@@ -255,6 +272,7 @@ def main() -> None:
             bootstrap_reference_sha256=reference_sha256(arguments.bootstrap_servers),
             consumer_group_sha256=reference_sha256(arguments.group_id),
             topic=arguments.topic,
+            lakehouse_scope=scope.value,
             messages_received=len(messages),
             records_written=records_written,
             records_already_present=records_already_present,

@@ -27,7 +27,7 @@ blueeconomy-ingest-events \
 
 The v2 file-ingestion report contains record counts, already-present counts, source systems, classifications, table version, the input-file SHA-256 and a SHA-256 reference for the table location. It does not disclose the raw input path, table URI or payload. The Kafka report similarly hashes broker and consumer-group references, records confirmed partition offsets and excludes credentials and message payloads.
 
-For Kafka ingestion, `--bootstrap-servers`, `--topic`, `--group-id`, `--security-protocol`, `--max-messages`, `--table-uri`, `--schema` and `--report` are mandatory. `PLAINTEXT` is accepted only for explicit loopback integration runs; non-local execution requires `SSL` or `SASL_SSL`, CA material and environment-injected SASL credentials where applicable. The proven local Apache Kafka-to-Delta path is documented in [`integration/kafka-delta`](integration/kafka-delta/README.md).
+For Kafka ingestion, `--bootstrap-servers`, `--topic`, `--group-id`, `--security-protocol`, `--max-messages`, `--lakehouse-scope`, `--table-uri`, `--schema` and `--report` are mandatory. `PLAINTEXT` is accepted only for explicit loopback integration runs; non-local execution requires `SSL` or `SASL_SSL`, CA material and environment-injected SASL credentials where applicable. The proven local Apache Kafka-to-Delta path is documented in [`integration/kafka-delta`](integration/kafka-delta/README.md).
 
 ## S2 GeoJSON geofence evaluation
 
@@ -56,3 +56,65 @@ The script runs Ruff formatting/linting, strict mypy, pytest with a real local D
 ## Data authority
 
 The schema requires `public`, `internal`, `confidential`, `restricted` or `highly_restricted` classification plus source-system and source-record references. These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
+
+## Fiduciary segregation (Workstream C / CVFF)
+
+Workstream C (CVFF fintech) runs on a **physically segregated Delta Lake schema** on Azure Government ADLS Gen2. Workstream C events carry the `fiduciary_segregated` classification and arrive on `cvff.*` Kafka topics; Workstream A (`ports.*`) and Workstream B (`ferries.*`) events remain in the platform scope. There is no shared schema and no shared storage root between the scopes:
+
+| Scope | Kafka namespaces | Delta tables |
+|---|---|---|
+| platform | `ports.*`, `ferries.*` | `<root>/platform/platform_bronze/events`, `platform_silver/events`, `platform_gold/events` |
+| cvff | `cvff.*` | `<root>/cvff/cvff_bronze/events`, `cvff_silver/events`, `cvff_gold/events` |
+
+### Boundary guarantees
+
+Segregation is enforced at the write path, not by routing convention:
+
+- `blueeconomy_data_platform.segregation.SegregatedDeltaWriter` is initialized for exactly one scope and one scope root. A cvff writer cannot be pointed at a non-`cvff*` root, and a platform writer cannot be pointed at a `cvff*` root — initialization fails closed.
+- `guard_write` raises `BoundaryViolationError` before any record is written when an event classification, Kafka topic or table URI belongs to the other scope. A platform writer cannot write a `fiduciary_segregated` record and a cvff writer cannot write any platform-classified record.
+- Classification and topic mappings fail closed: an unrecognized `data_classification` or a topic outside the `cvff.*`/`ports.*`/`ferries.*` namespaces is rejected, never defaulted.
+- `blueeconomy-ingest-kafka` requires `--lakehouse-scope platform|cvff`; the topic namespace, the event classifications in the batch and the target table URI must all match the declared scope before consumption is persisted.
+
+### CVFF medallion layers
+
+`blueeconomy_data_platform.medallion` implements the segregated cvff medallion pipeline on top of `SegregatedDeltaWriter`:
+
+- **Bronze** — raw validated envelopes, append-only. The retention policy (default 30 days hot, 7 years cold, bounds-validated) is committed in the Delta table description at creation (the delta-rs kernel rejects custom table properties, so the horizons live in retained table metadata); `RetentionPolicy.tier_for` and `retention_report` classify records as `hot`, `cold` or `expired` for the operations runbook.
+- **Silver** — deduplicated on the composite key `sha256(kafka_topic/kafka_partition/kafka_offset/ledgerCommitHash)`. The `ledgerCommitHash` (64 lowercase hex) is required in the cvff payload. Replayed Kafka records with an identical dedup key are counted as already present and never duplicated; a dedup key reused with conflicting content fails closed.
+- **Gold** — a curated one-row-per-`ledgerCommitHash` snapshot (record count, occurrence window, source systems, event IDs) atomically overwritten from silver.
+
+### Segregated read access
+
+`blueeconomy_data_platform.access_policy` maps Keycloak-style role claims to readable schemas. The cvff schemas are readable **only** by cvff-scoped roles, all read-only on the CVFF scope:
+
+| Role claim | Readable schemas |
+|---|---|
+| `independent-auditor` | `cvff_bronze`, `cvff_silver`, `cvff_gold` |
+| `nimasa-approver` | `cvff_bronze`, `cvff_silver`, `cvff_gold` |
+| `cbn-observer` | `cvff_bronze`, `cvff_silver`, `cvff_gold` |
+| `fmmbe-oversight` | `platform_bronze`, `platform_silver`, `platform_gold` |
+
+Unknown roles, unknown schemas and empty claim sets are denied. No governance role can write; writes belong to governed service principals. This module is the platform-side policy of record: deployment must bind the same grants to Keycloak client scopes and ADLS Gen2 ACLs so the storage layer independently denies what the policy denies.
+
+### Azure Government storage configuration
+
+Lakehouse roots are resolved from the environment only; no endpoint, account or credential is hardcoded, and no AWS-specific assumptions exist anywhere in the codebase. `blueeconomy_data_platform.storage.resolve_lakehouse_root` fails closed unless configuration is complete:
+
+| Variable | Requirement |
+|---|---|
+| `BLUEECONOMY_STORAGE_BACKEND` | `adls-gen2` for deployment; `local` only behind the explicit `BLUEECONOMY_ALLOW_LOCAL_STORAGE=true` development gate. |
+| `BLUEECONOMY_AZURE_CLOUD` | `AzureUSGovernment` (endpoint suffix `dfs.core.usgovcloudapi.net`) for the CVFF deployment, or `AzureCloud`. No other cloud is accepted. |
+| `BLUEECONOMY_STORAGE_ACCOUNT` | ADLS Gen2 account name (3–24 lowercase alphanumeric). |
+| `BLUEECONOMY_STORAGE_FILESYSTEM` | ADLS Gen2 filesystem (container) name. |
+| `BLUEECONOMY_LOCAL_LAKEHOUSE_ROOT` | Absolute path; required only for the gated local backend. |
+
+The resolved URI is `abfs://<filesystem>@<account>.<cloud-suffix>/<scope>` — for Azure Government, `abfs://<filesystem>@<account>.dfs.core.usgovcloudapi.net/cvff`. Credentials are never embedded in URIs; authentication is environment-injected at deployment (managed identity / workload identity against `login.microsoftonline.us`). Azure Government deployment additionally requires an approved ADLS Gen2 account in the US Gov region, Keycloak role bindings matching the table above, and per-scope ACLs on the `cvff/` and `platform/` roots.
+
+### Segregation runbook
+
+1. Provision one ADLS Gen2 filesystem per environment in Azure Government; apply deny-all default ACLs, then grant the cvff writer service principal `rwx` on `/cvff/**` only and the platform writer on `/platform/**` only.
+2. Create Kafka topics under the governed namespaces (`cvff.*`, `ports.*`, `ferries.*`) with ACLs that let each consumer group subscribe only to its scope's namespace.
+3. Run consumers with the matching scope, e.g. `blueeconomy-ingest-kafka --lakehouse-scope cvff --topic cvff.ledger.commitments --table-uri <cvff bronze URI> ...`. A scope/topic/table/classification mismatch aborts before any write.
+4. Promote bronze→silver with `medallion.build_silver_record` + `medallion.append_silver`; replays are idempotent on the dedup key. Rebuild gold with `medallion.curate_gold`.
+5. Retention: evaluate `medallion.retention_report` daily. Move `cold` records to the archive tier per the retention policy; `expired` records require legal-hold review before deletion. Bronze/silver tables are append-only; deletions are exceptional, evidence-recorded operations.
+6. Grant auditor/NIMASA/CBN read access by assigning the Keycloak roles above; verify with `access_policy.authorize_read` before issuing credentials, and confirm ADLS ACLs independently deny cross-scope reads.
