@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from deltalake import DeltaTable
+import pyarrow as pa
+from deltalake import DeltaTable, write_deltalake
 
 from blueeconomy_data_platform.ingest import (
     append_events,
     load_schema,
     normalize_event,
     read_and_validate_events,
+    reject_conflicting_event_replays,
     validate_maritime_position,
     validate_output_path,
     validate_table_uri,
@@ -169,3 +171,47 @@ def test_report_cannot_overwrite_input(tmp_path: Path) -> None:
         assert "must not overwrite" in str(error)
     else:
         raise AssertionError("report was permitted to overwrite input")
+
+
+def test_replay_guard_tolerates_filtered_read_after_merge_write(tmp_path: Path) -> None:
+    """Regression: deltalake 1.6.2 + pyarrow 25 raise ArrowNotImplementedError
+    ("Function 'greater_equal' has no kernel matching input types
+    (string, string_view)") on filtered ``to_pyarrow_table`` reads of tables
+    containing merge-written files: merge output types strings as
+    string_view, which the pyarrow filter kernel cannot compare with string
+    literals. The replay-conflict guard must catch that specific failure and
+    fall back to an unfiltered read with Python-side filtering."""
+    input_path = tmp_path / "events.ndjson"
+    first = valid_event()
+    second = valid_event()
+    second["event_id"] = "event-002"
+    second["source_record_reference"] = "source-record-002"
+    second["correlation_id"] = "correlation-002"
+    write_ndjson(input_path, [first, second])
+    events = read_and_validate_events(input_path, load_schema(schema_path()))
+    table_path = str(tmp_path / "delta-events")
+    write_deltalake(table_path, pa.Table.from_pylist(events), mode="error")
+
+    # A merge that updates one row rewrites the file and copies the
+    # untouched row into merge-written (string_view-typed) output.
+    mutated = dict(events[0], payload_json='{"integrity_status":"mutated"}')
+    DeltaTable(table_path).merge(
+        source=pa.Table.from_pylist([mutated]),
+        predicate="target.event_id = source.event_id",
+        source_alias="source",
+        target_alias="target",
+    ).when_matched_update_all().execute()
+
+    retained = DeltaTable(table_path)
+    # Identical replay of the untouched row passes the guard even though the
+    # filtered read had to fall back to an unfiltered scan.
+    reject_conflicting_event_replays(retained, [events[1]])
+
+    # A conflicting replay is still detected through the fallback path.
+    conflicting = dict(events[1], payload_json='{"integrity_status":"failed"}')
+    try:
+        reject_conflicting_event_replays(retained, [conflicting])
+    except ValueError as error:
+        assert "event_id reuse conflicts" in str(error)
+    else:
+        raise AssertionError("conflicting replay against merge-written table was accepted")

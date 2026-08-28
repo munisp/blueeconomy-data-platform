@@ -293,12 +293,38 @@ EVENT_IDENTITY_COLUMNS = (
 )
 
 
+def read_identity_rows(
+    table: DeltaTable,
+    columns: list[str],
+    key_column: str,
+    keys: list[str],
+) -> list[dict[str, Any]]:
+    """Read replay-guard identity rows, tolerant of merge-written files.
+
+    deltalake 1.6.2 with pyarrow 25 raises ``ArrowNotImplementedError`` on
+    filtered ``to_pyarrow_table`` reads of tables containing merge-written
+    files. The replay guards must stay fail-closed regardless of file
+    provenance, so on exactly that failure we fall back to an unfiltered
+    read and filter the rows in Python. Any other error still propagates.
+    """
+    try:
+        filtered: list[dict[str, Any]] = table.to_pyarrow_table(
+            columns=columns,
+            filters=[(key_column, "in", list(keys))],
+        ).to_pylist()
+        return filtered
+    except pa.lib.ArrowNotImplementedError:
+        wanted = {str(key) for key in keys}
+        return [
+            row
+            for row in table.to_pyarrow_table(columns=columns).to_pylist()
+            if str(row[key_column]) in wanted
+        ]
+
+
 def reject_conflicting_event_replays(table: DeltaTable, events: list[dict[str, Any]]) -> None:
     event_ids = [str(event["event_id"]) for event in events]
-    existing_rows = table.to_pyarrow_table(
-        columns=list(EVENT_IDENTITY_COLUMNS),
-        filters=[("event_id", "in", event_ids)],
-    ).to_pylist()
+    existing_rows = read_identity_rows(table, list(EVENT_IDENTITY_COLUMNS), "event_id", event_ids)
     existing_by_id = {str(row["event_id"]): row for row in existing_rows}
     conflicts: list[str] = []
     for event in events:

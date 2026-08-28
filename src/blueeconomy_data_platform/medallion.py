@@ -23,7 +23,7 @@ import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import CommitFailedError, TableNotFoundError
 
-from blueeconomy_data_platform.ingest import MAX_COMMIT_ATTEMPTS
+from blueeconomy_data_platform.ingest import MAX_COMMIT_ATTEMPTS, read_identity_rows
 from blueeconomy_data_platform.segregation import (
     BoundaryViolationError,
     LakehouseScope,
@@ -184,10 +184,9 @@ def _table_exists(table_uri: str) -> bool:
 
 def _reject_conflicting_dedup_replays(table: DeltaTable, records: list[dict[str, Any]]) -> None:
     keys = [str(record["dedup_key"]) for record in records]
-    existing_rows = table.to_pyarrow_table(
-        columns=[*SILVER_IDENTITY_COLUMNS, "dedup_key"],
-        filters=[("dedup_key", "in", keys)],
-    ).to_pylist()
+    existing_rows = read_identity_rows(
+        table, [*SILVER_IDENTITY_COLUMNS, "dedup_key"], "dedup_key", keys
+    )
     existing_by_key = {str(row["dedup_key"]): row for row in existing_rows}
     conflicts: list[str] = []
     for record in records:
