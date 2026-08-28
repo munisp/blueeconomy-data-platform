@@ -1,11 +1,14 @@
 """Fail-closed fiduciary segregation boundaries for the platform lakehouse.
 
 Workstream C (CVFF fintech) events are physically segregated from Workstream A
-(ports.*) and Workstream B (ferries.*) events. Classification is not a routing
-hint: :class:`SegregatedDeltaWriter` is initialized for exactly one lakehouse
-scope and raises :class:`BoundaryViolationError` on any cross-boundary write
-attempt, including events with the wrong classification, Kafka topics outside
-the writer's namespace, or table URIs outside the writer's segregated root.
+(ports.*) and Workstream B (ferries.*) events, and the phase-2 lakehouse scopes
+extend the same model to Workstream D (seafarer credentials), Workstream E
+(fisheries catch/coldchain/export) and Workstream F (classified ISR tracks).
+Classification is not a routing hint: :class:`SegregatedDeltaWriter` is
+initialized for exactly one lakehouse scope and raises
+:class:`BoundaryViolationError` on any cross-boundary write attempt, including
+events with the wrong classification, Kafka topics outside the writer's
+namespace, or table URIs outside the writer's segregated root.
 """
 
 from __future__ import annotations
@@ -20,8 +23,16 @@ FIDUCIARY_SEGREGATED_CLASSIFICATION = "fiduciary_segregated"
 PLATFORM_CLASSIFICATIONS = frozenset(
     {"public", "internal", "confidential", "restricted", "highly_restricted"}
 )
+SEAFARER_CLASSIFICATION = "seafarer_confidential"
+FISHERIES_CLASSIFICATION = "fisheries_operational"
+ISR_CLASSIFICATION = "isr_classified"
+
 CVFF_TOPIC_PREFIX = "cvff."
 PLATFORM_TOPIC_PREFIXES = ("ports.", "ferries.")
+SEAFARER_TOPIC_PREFIXES = ("seafarer.",)
+FISHERIES_TOPIC_PREFIXES = ("fisheries.", "coldchain.", "export.")
+ISR_TOPIC_PREFIXES = ("maritime.isr.", "maritime.behaviour.", "maritime.outcome.")
+
 CVFF_ROOT_COMPONENT_PATTERN = re.compile(r"^cvff($|[_-])")
 
 
@@ -34,18 +45,51 @@ class LakehouseScope(Enum):
 
     PLATFORM = "platform"
     CVFF = "cvff"
+    SEAFARER = "seafarer"
+    FISHERIES = "fisheries"
+    ISR = "isr"
 
     @property
     def layer_prefix(self) -> str:
-        return "cvff" if self is LakehouseScope.CVFF else "platform"
+        return self.value
+
+    @property
+    def root_component_pattern(self) -> re.Pattern[str]:
+        """Pattern matching this scope's own storage root path components."""
+        return re.compile(rf"^{self.value}($|[_-])")
+
+
+SEGREGATED_SCOPES = frozenset(
+    {
+        LakehouseScope.CVFF,
+        LakehouseScope.SEAFARER,
+        LakehouseScope.FISHERIES,
+        LakehouseScope.ISR,
+    }
+)
+
+SCOPE_TOPIC_PREFIXES: dict[LakehouseScope, tuple[str, ...]] = {
+    LakehouseScope.PLATFORM: PLATFORM_TOPIC_PREFIXES,
+    LakehouseScope.CVFF: (CVFF_TOPIC_PREFIX,),
+    LakehouseScope.SEAFARER: SEAFARER_TOPIC_PREFIXES,
+    LakehouseScope.FISHERIES: FISHERIES_TOPIC_PREFIXES,
+    LakehouseScope.ISR: ISR_TOPIC_PREFIXES,
+}
+
+SCOPE_CLASSIFICATIONS: dict[LakehouseScope, frozenset[str]] = {
+    LakehouseScope.PLATFORM: PLATFORM_CLASSIFICATIONS,
+    LakehouseScope.CVFF: frozenset({FIDUCIARY_SEGREGATED_CLASSIFICATION}),
+    LakehouseScope.SEAFARER: frozenset({SEAFARER_CLASSIFICATION}),
+    LakehouseScope.FISHERIES: frozenset({FISHERIES_CLASSIFICATION}),
+    LakehouseScope.ISR: frozenset({ISR_CLASSIFICATION}),
+}
 
 
 def scope_for_classification(data_classification: str) -> LakehouseScope:
     """Map an event classification to its mandatory lakehouse scope, failing closed."""
-    if data_classification == FIDUCIARY_SEGREGATED_CLASSIFICATION:
-        return LakehouseScope.CVFF
-    if data_classification in PLATFORM_CLASSIFICATIONS:
-        return LakehouseScope.PLATFORM
+    for scope, classifications in SCOPE_CLASSIFICATIONS.items():
+        if data_classification in classifications:
+            return scope
     raise BoundaryViolationError(
         f"data_classification {data_classification!r} is not mapped to any lakehouse scope"
     )
@@ -53,20 +97,31 @@ def scope_for_classification(data_classification: str) -> LakehouseScope:
 
 def scope_for_topic(topic: str) -> LakehouseScope:
     """Map a Kafka topic namespace to its mandatory lakehouse scope, failing closed."""
-    if topic.startswith(CVFF_TOPIC_PREFIX):
-        return LakehouseScope.CVFF
-    if topic.startswith(PLATFORM_TOPIC_PREFIXES):
-        return LakehouseScope.PLATFORM
+    for scope, prefixes in SCOPE_TOPIC_PREFIXES.items():
+        if topic.startswith(prefixes):
+            return scope
+    governed = "/".join(
+        f"{prefix}*" for prefixes in SCOPE_TOPIC_PREFIXES.values() for prefix in prefixes
+    )
     raise BoundaryViolationError(
-        f"Kafka topic {topic!r} is outside the governed cvff.*/ports.*/ferries.* namespaces"
+        f"Kafka topic {topic!r} is outside the governed namespaces ({governed})"
+    )
+
+
+def scopes_declared_by_uri(table_uri: str) -> frozenset[LakehouseScope]:
+    """Return the segregated scopes whose root component appears in a URI path."""
+    path = urlsplit(table_uri).path
+    components = [component for component in path.split("/") if component]
+    return frozenset(
+        scope
+        for scope in SEGREGATED_SCOPES
+        if any(scope.root_component_pattern.match(component) for component in components)
     )
 
 
 def uri_declares_cvff_root(table_uri: str) -> bool:
     """Return True when any URI path component belongs to the segregated cvff root."""
-    path = urlsplit(table_uri).path
-    components = [component for component in path.split("/") if component]
-    return any(CVFF_ROOT_COMPONENT_PATTERN.match(component) for component in components)
+    return LakehouseScope.CVFF in scopes_declared_by_uri(table_uri)
 
 
 @dataclass(frozen=True)
@@ -88,25 +143,36 @@ class LakehouseRoots:
 def build_lakehouse_roots(scope: LakehouseScope, scope_root_uri: str) -> LakehouseRoots:
     """Build medallion roots under one scope root and enforce the path boundary.
 
-    The cvff scope root must end in a path component starting with ``cvff``
-    (for example ``.../cvff``) and the platform scope root must not. This
-    prevents a writer from being pointed at the other scope's storage.
+    A segregated scope root must end in a path component starting with that
+    scope's prefix (for example ``.../cvff`` or ``.../isr``) and must not
+    declare any other segregated scope; the platform scope root must not
+    declare any segregated scope at all. This prevents a writer from being
+    pointed at another scope's storage.
     """
     if not scope_root_uri or scope_root_uri != scope_root_uri.strip():
         raise BoundaryViolationError("scope root URI must be canonical non-empty text")
     root = scope_root_uri.rstrip("/")
     terminal = root.rsplit("/", 1)[-1]
-    declares_cvff = bool(CVFF_ROOT_COMPONENT_PATTERN.match(terminal))
-    if scope is LakehouseScope.CVFF and not declares_cvff:
-        raise BoundaryViolationError(
-            "cvff scope root must terminate in a cvff* path component; "
-            f"refusing to initialize a cvff writer against {scope_root_uri!r}"
-        )
-    if scope is LakehouseScope.PLATFORM and declares_cvff:
-        raise BoundaryViolationError(
-            "platform scope root must not terminate in a cvff* path component; "
-            f"refusing to initialize a platform writer against {scope_root_uri!r}"
-        )
+    terminal_scopes = frozenset(
+        candidate
+        for candidate in SEGREGATED_SCOPES
+        if candidate.root_component_pattern.match(terminal)
+    )
+    if scope is LakehouseScope.PLATFORM:
+        if terminal_scopes:
+            declared = sorted(candidate.value for candidate in terminal_scopes)
+            raise BoundaryViolationError(
+                "platform scope root must not terminate in a segregated scope path component "
+                f"({', '.join(declared)}); refusing to initialize a platform writer against "
+                f"{scope_root_uri!r}"
+            )
+    else:
+        if terminal_scopes != frozenset({scope}):
+            raise BoundaryViolationError(
+                f"{scope.value} scope root must terminate in a {scope.value}* path component "
+                "and no other segregated scope component; refusing to initialize a "
+                f"{scope.value} writer against {scope_root_uri!r}"
+            )
     prefix = scope.layer_prefix
     return LakehouseRoots(
         scope=scope,
@@ -118,14 +184,19 @@ def build_lakehouse_roots(scope: LakehouseScope, scope_root_uri: str) -> Lakehou
 
 def require_scope_table_uri(scope: LakehouseScope, table_uri: str) -> None:
     """Fail closed when a table URI does not belong to the scope's segregated root."""
-    declares_cvff = uri_declares_cvff_root(table_uri)
-    if scope is LakehouseScope.CVFF and not declares_cvff:
+    declared = scopes_declared_by_uri(table_uri)
+    if scope is LakehouseScope.PLATFORM:
+        if declared:
+            names = sorted(candidate.value for candidate in declared)
+            raise BoundaryViolationError(
+                f"platform writer cannot target {table_uri!r}: "
+                f"segregated root component present ({', '.join(names)})"
+            )
+        return
+    if declared != frozenset({scope}):
         raise BoundaryViolationError(
-            f"cvff writer cannot target {table_uri!r}: no cvff* root component present"
-        )
-    if scope is LakehouseScope.PLATFORM and declares_cvff:
-        raise BoundaryViolationError(
-            f"platform writer cannot target {table_uri!r}: cvff root component present"
+            f"{scope.value} writer cannot target {table_uri!r}: URI must declare the "
+            f"{scope.value}* root component and no other segregated scope root"
         )
 
 
@@ -158,7 +229,7 @@ class SegregatedDeltaWriter:
 
     The writer resolves its medallion table URIs from a single scope root at
     initialization and refuses, at the write path, any event classification,
-    Kafka topic or table URI that belongs to the other scope.
+    Kafka topic or table URI that belongs to another scope.
     """
 
     def __init__(self, scope: LakehouseScope, scope_root_uri: str) -> None:

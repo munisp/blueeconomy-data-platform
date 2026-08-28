@@ -55,16 +55,21 @@ The script runs Ruff formatting/linting, strict mypy, pytest with a real local D
 
 ## Data authority
 
-The schema requires `public`, `internal`, `confidential`, `restricted` or `highly_restricted` classification plus source-system and source-record references. These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
+The schema requires a governed classification (`public`, `internal`, `confidential`, `restricted`, `highly_restricted`, `fiduciary_segregated`, `seafarer_confidential`, `fisheries_operational` or `isr_classified`) plus source-system and source-record references, with an optional per-record `record_classification` clearance label (mandatory for ISR scope ingestion). These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
 
 ## Fiduciary segregation (Workstream C / CVFF)
 
-Workstream C (CVFF fintech) runs on a **physically segregated Delta Lake schema** on Azure Government ADLS Gen2. Workstream C events carry the `fiduciary_segregated` classification and arrive on `cvff.*` Kafka topics; Workstream A (`ports.*`) and Workstream B (`ferries.*`) events remain in the platform scope. There is no shared schema and no shared storage root between the scopes:
+Workstream C (CVFF fintech) runs on a **physically segregated Delta Lake schema**, deployable on Azure Government ADLS Gen2 or any S3-compatible object storage (see [Cloud-agnostic storage configuration](#cloud-agnostic-storage-configuration)). Workstream C events carry the `fiduciary_segregated` classification and arrive on `cvff.*` Kafka topics; Workstream A (`ports.*`) and Workstream B (`ferries.*`) events remain in the platform scope. Phase 2 adds the Workstream D (seafarer credentials), E (fisheries catch/coldchain/export) and F (classified ISR) scopes under the same segregation model. There is no shared schema and no shared storage root between the scopes:
 
-| Scope | Kafka namespaces | Delta tables |
-|---|---|---|
-| platform | `ports.*`, `ferries.*` | `<root>/platform/platform_bronze/events`, `platform_silver/events`, `platform_gold/events` |
-| cvff | `cvff.*` | `<root>/cvff/cvff_bronze/events`, `cvff_silver/events`, `cvff_gold/events` |
+| Scope | Kafka namespaces | Event classification | Delta tables |
+|---|---|---|---|
+| platform | `ports.*`, `ferries.*` | `public`, `internal`, `confidential`, `restricted`, `highly_restricted` | `<root>/platform/platform_bronze/events`, `platform_silver/events`, `platform_gold/events` |
+| cvff | `cvff.*` | `fiduciary_segregated` | `<root>/cvff/cvff_bronze/events`, `cvff_silver/events`, `cvff_gold/events` |
+| seafarer | `seafarer.*` | `seafarer_confidential` (CONFIDENTIAL credentials) | `<root>/seafarer/seafarer_bronze/events`, `seafarer_silver/events`, `seafarer_gold/events` |
+| fisheries | `fisheries.*`, `coldchain.*`, `export.*` | `fisheries_operational` | `<root>/fisheries/fisheries_bronze/events`, `fisheries_silver/events`, `fisheries_gold/events` |
+| isr | `maritime.isr.*`, `maritime.behaviour.*`, `maritime.outcome.*` | `isr_classified` (CLASSIFIED — highest bar) | `<root>/isr/isr_bronze/events`, `isr_silver/events`, `isr_gold/events` |
+
+The phase-2 scopes (Workstreams D, E, F) follow the same boundary model as cvff: each scope root must terminate in its own `<scope>*` path component and no other, every scope has its own medallion tables, and `SegregatedDeltaWriter`/`guard_write` enforce classification, topic and table-URI boundaries identically for every scope.
 
 ### Boundary guarantees
 
@@ -73,7 +78,8 @@ Segregation is enforced at the write path, not by routing convention:
 - `blueeconomy_data_platform.segregation.SegregatedDeltaWriter` is initialized for exactly one scope and one scope root. A cvff writer cannot be pointed at a non-`cvff*` root, and a platform writer cannot be pointed at a `cvff*` root — initialization fails closed.
 - `guard_write` raises `BoundaryViolationError` before any record is written when an event classification, Kafka topic or table URI belongs to the other scope. A platform writer cannot write a `fiduciary_segregated` record and a cvff writer cannot write any platform-classified record.
 - Classification and topic mappings fail closed: an unrecognized `data_classification` or a topic outside the `cvff.*`/`ports.*`/`ferries.*` namespaces is rejected, never defaulted.
-- `blueeconomy-ingest-kafka` requires `--lakehouse-scope platform|cvff`; the topic namespace, the event classifications in the batch and the target table URI must all match the declared scope before consumption is persisted.
+- `blueeconomy-ingest-kafka` requires `--lakehouse-scope platform|cvff|seafarer|fisheries|isr`; the topic namespace, the event classifications in the batch and the target table URI must all match the declared scope before consumption is persisted.
+- Classification-labelled ingestion: ISR-scope records must additionally carry a per-record `record_classification` clearance label (`UNCLASSIFIED`, `RESTRICTED`, `CONFIDENTIAL` or `SECRET`). An ISR record without the label is rejected before any write; the validated label is persisted as a `record_classification` column so readers apply row-level clearance filtering (`access_policy.clearance_permits` / `filter_records_by_clearance`).
 
 ### CVFF medallion layers
 
@@ -85,35 +91,60 @@ Segregation is enforced at the write path, not by routing convention:
 
 ### Segregated read access
 
-`blueeconomy_data_platform.access_policy` maps Keycloak-style role claims to readable schemas. The cvff schemas are readable **only** by cvff-scoped roles, all read-only on the CVFF scope:
+`blueeconomy_data_platform.access_policy` maps Keycloak-style role claims to readable schemas. Each segregated scope's schemas are readable **only** by that scope's roles:
 
-| Role claim | Readable schemas |
-|---|---|
-| `independent-auditor` | `cvff_bronze`, `cvff_silver`, `cvff_gold` |
-| `nimasa-approver` | `cvff_bronze`, `cvff_silver`, `cvff_gold` |
-| `cbn-observer` | `cvff_bronze`, `cvff_silver`, `cvff_gold` |
-| `fmmbe-oversight` | `platform_bronze`, `platform_silver`, `platform_gold` |
+| Role claim | Readable schemas | Required clearance |
+|---|---|---|
+| `independent-auditor` | `cvff_bronze`, `cvff_silver`, `cvff_gold` | — (UNCLASSIFIED floor) |
+| `nimasa-approver` | `cvff_bronze`, `cvff_silver`, `cvff_gold` | — (UNCLASSIFIED floor) |
+| `cbn-observer` | `cvff_bronze`, `cvff_silver`, `cvff_gold` | — (UNCLASSIFIED floor) |
+| `fmmbe-oversight` | `platform_bronze`, `platform_silver`, `platform_gold` | — (UNCLASSIFIED floor) |
+| `seafarer-registry` | `seafarer_bronze`, `seafarer_silver`, `seafarer_gold` | CONFIDENTIAL |
+| `fisheries-operations` | `fisheries_bronze`, `fisheries_silver`, `fisheries_gold` | RESTRICTED |
+| `isr-analyst` | `isr_bronze`, `isr_silver`, `isr_gold` | SECRET (`isr_gold`: CONFIDENTIAL) |
+| `insurer-aggregator` | `isr_gold` only | CONFIDENTIAL |
 
-Unknown roles, unknown schemas and empty claim sets are denied. No governance role can write; writes belong to governed service principals. This module is the platform-side policy of record: deployment must bind the same grants to Keycloak client scopes and ADLS Gen2 ACLs so the storage layer independently denies what the policy denies.
+#### Clearance model (Workstream F)
 
-### Azure Government storage configuration
+Clearance levels are strictly ordered: `UNCLASSIFIED < RESTRICTED < CONFIDENTIAL < SECRET`. For any schema above the UNCLASSIFIED floor, `authorize_read(roles, schema, clearance=...)` requires a clearance claim at or above the schema's classification floor; a missing or unknown clearance is denied (fail closed). The `insurer-aggregator` role is deliberately granted **only** the declassified ISR outcome aggregates (`isr_gold`, derived from `maritime.outcome.*` events) and can never read the raw or behavioural ISR tracks (`isr_bronze`/`isr_silver`), no matter what clearance it presents. Row-level filtering uses the persisted `record_classification` column: `clearance_permits(clearance, label)` is the predicate and `filter_records_by_clearance` withholds every row whose label is missing or unknown.
 
-Lakehouse roots are resolved from the environment only; no endpoint, account or credential is hardcoded, and no AWS-specific assumptions exist anywhere in the codebase. `blueeconomy_data_platform.storage.resolve_lakehouse_root` fails closed unless configuration is complete:
+Unknown roles, unknown schemas and empty claim sets are denied. No governance role can write; writes belong to governed service principals. This module is the platform-side policy of record: deployment must bind the same grants to Keycloak client scopes and storage-layer ACLs so the storage layer independently denies what the policy denies.
+
+### Export consignment traceability (Workstream E)
+
+`blueeconomy_data_platform.export_consignment` builds the fisheries gold-layer consignment view. `build_consignment_records` groups fisheries bronze events by `payload.consignmentId` — exactly one `fisheries.catch.*` event (species code, catch weight), the `fisheries.custody.*` transfer trail, `coldchain.*` temperature samples (range-validated, reduced to a tamper-evident SHA-256 digest of the ordered `(event_id, occurred_at, temperature_celsius)` samples) and the optional `export.*` declaration reference. `assemble_export_consignment_gold` rebuilds `<root>/fisheries/fisheries_gold/export_consignments` atomically from bronze under the declared `EXPORT_CONSIGNMENT_SCHEMA` (pyarrow). Assembly fails closed on missing/duplicate catch events, malformed consignment IDs, implausible temperatures or ungoverned event families, and only a fisheries-scope writer may assemble.
+
+### Cloud-agnostic storage configuration
+
+The platform is not Azure-locked. `blueeconomy_data_platform.storage` is the only module containing cloud specifics; segregation, medallion and access layers consume resolved URIs and never branch on a provider. Lakehouse roots are resolved from the environment only; no endpoint, account, bucket or credential is hardcoded. `resolve_lakehouse_root` fails closed unless configuration is complete:
 
 | Variable | Requirement |
 |---|---|
-| `BLUEECONOMY_STORAGE_BACKEND` | `adls-gen2` for deployment; `local` only behind the explicit `BLUEECONOMY_ALLOW_LOCAL_STORAGE=true` development gate. |
-| `BLUEECONOMY_AZURE_CLOUD` | `AzureUSGovernment` (endpoint suffix `dfs.core.usgovcloudapi.net`) for the CVFF deployment, or `AzureCloud`. No other cloud is accepted. |
-| `BLUEECONOMY_STORAGE_ACCOUNT` | ADLS Gen2 account name (3–24 lowercase alphanumeric). |
-| `BLUEECONOMY_STORAGE_FILESYSTEM` | ADLS Gen2 filesystem (container) name. |
+| `BLUEECONOMY_STORAGE_BACKEND` | `adls`, `s3`, or `local-gated` (the latter only behind the explicit `BLUEECONOMY_ALLOW_LOCAL_STORAGE=true` development gate). The historical values `adls-gen2` and `local` remain accepted as aliases. |
+| `BLUEECONOMY_AZURE_CLOUD` | ADLS only: `AzureUSGovernment` (endpoint suffix `dfs.core.usgovcloudapi.net`) for the CVFF deployment, or `AzureCloud`. No other cloud is accepted. |
+| `BLUEECONOMY_STORAGE_ACCOUNT` | ADLS only: ADLS Gen2 account name (3–24 lowercase alphanumeric). |
+| `BLUEECONOMY_STORAGE_FILESYSTEM` | ADLS only: ADLS Gen2 filesystem (container) name. |
+| `BLUEECONOMY_S3_BUCKET` | S3 only: bucket name (3–63 lowercase letters/digits/dots/hyphens, no IP-address form, no consecutive dots). |
+| `BLUEECONOMY_S3_REGION` | S3 only: region identifier such as `us-east-1` or `us-gov-west-1`. |
+| `BLUEECONOMY_S3_ENDPOINT_URL` | S3 only, optional: custom endpoint for MinIO/Ceph/GCS-interop, e.g. `https://minio.storage.example:9000`. No credentials, path or query allowed; the scheme must match `BLUEECONOMY_S3_SECURE`. |
+| `BLUEECONOMY_S3_SECURE` | S3 only: exactly `true` or `false`. `false` (plain HTTP) is permitted only against an explicit custom endpoint; AWS S3 transport is always TLS. |
 | `BLUEECONOMY_LOCAL_LAKEHOUSE_ROOT` | Absolute path; required only for the gated local backend. |
 
-The resolved URI is `abfs://<filesystem>@<account>.<cloud-suffix>/<scope>` — for Azure Government, `abfs://<filesystem>@<account>.dfs.core.usgovcloudapi.net/cvff`. Credentials are never embedded in URIs; authentication is environment-injected at deployment (managed identity / workload identity against `login.microsoftonline.us`). Azure Government deployment additionally requires an approved ADLS Gen2 account in the US Gov region, Keycloak role bindings matching the table above, and per-scope ACLs on the `cvff/` and `platform/` roots.
+Resolved URIs are `abfs://<filesystem>@<account>.<cloud-suffix>/<scope>` for ADLS and `s3://<bucket>/<scope>` for S3-compatible storage. Credentials are never embedded in URIs and never returned by the storage module; authentication is environment-injected at deployment (managed/workload identity against `login.microsoftonline.us` for ADLS; the standard `AWS_*` credential chain for S3-compatible backends). `resolve_storage_options` maps the validated configuration to non-secret deltalake/object_store options (`AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`) so writers stay provider-neutral, and `validate_s3_uri` enforces bucket/key rules (fail closed on embedded credentials, empty or `..` segments, control characters).
+
+#### Neutral reference deployment: MinIO on any Kubernetes
+
+The cloud-neutral reference deployment runs [MinIO](https://min.io/) (or any S3-compatible service — Ceph RGW, GCS with S3 interoperability, AWS S3) on any Kubernetes cluster:
+
+1. Deploy MinIO (operator or Helm chart) with TLS enabled; create one bucket per environment (e.g. `blueeconomy-lakehouse`) and one IAM policy per scope prefix (`cvff/*`, `platform/*`, `seafarer/*`, `fisheries/*`, `isr/*`) bound to per-scope service accounts.
+2. Inject credentials through Kubernetes Secrets into the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` environment variables of the ingestion workloads — never into URIs, ConfigMaps or images.
+3. Configure the workloads with `BLUEECONOMY_STORAGE_BACKEND=s3`, `BLUEECONOMY_S3_BUCKET`, `BLUEECONOMY_S3_REGION` (MinIO conventionally `us-east-1`), `BLUEECONOMY_S3_ENDPOINT_URL=https://<minio-service>:9000` and `BLUEECONOMY_S3_SECURE=true`.
+4. The same binaries run unchanged on AWS GovCloud S3 (drop the endpoint variable), Azure Government ADLS Gen2 (`BLUEECONOMY_STORAGE_BACKEND=adls` with the Azure coordinates above) or the gated local backend for conformance runs. Azure Government deployment additionally requires an approved ADLS Gen2 account in the US Gov region, Keycloak role bindings matching the table above, and per-scope ACLs on the scope roots.
 
 ### Segregation runbook
 
-1. Provision one ADLS Gen2 filesystem per environment in Azure Government; apply deny-all default ACLs, then grant the cvff writer service principal `rwx` on `/cvff/**` only and the platform writer on `/platform/**` only.
-2. Create Kafka topics under the governed namespaces (`cvff.*`, `ports.*`, `ferries.*`) with ACLs that let each consumer group subscribe only to its scope's namespace.
+1. Provision one filesystem/bucket per environment on the selected backend; apply deny-all default ACLs, then grant each scope's writer service principal access to its own root only (`/cvff/**`, `/platform/**`, `/seafarer/**`, `/fisheries/**`, `/isr/**`).
+2. Create Kafka topics under the governed namespaces (`cvff.*`, `ports.*`, `ferries.*`, `seafarer.*`, `fisheries.*`, `coldchain.*`, `export.*`, `maritime.isr.*`, `maritime.behaviour.*`, `maritime.outcome.*`) with ACLs that let each consumer group subscribe only to its scope's namespace.
 3. Run consumers with the matching scope, e.g. `blueeconomy-ingest-kafka --lakehouse-scope cvff --topic cvff.ledger.commitments --table-uri <cvff bronze URI> ...`. A scope/topic/table/classification mismatch aborts before any write.
 4. Promote bronze→silver with `medallion.build_silver_record` + `medallion.append_silver`; replays are idempotent on the dedup key. Rebuild gold with `medallion.curate_gold`.
 5. Retention: evaluate `medallion.retention_report` daily. Move `cold` records to the archive tier per the retention policy; `expired` records require legal-hold review before deletion. Bronze/silver tables are append-only; deletions are exceptional, evidence-recorded operations.

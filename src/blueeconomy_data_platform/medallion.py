@@ -97,7 +97,7 @@ class RetentionPolicy:
             return "cold"
         return "expired"
 
-    def as_table_description(self) -> str:
+    def as_table_description(self, scope_label: str = "CVFF") -> str:
         """Encode the policy in the Delta table description for operations evidence.
 
         The delta-rs kernel accepts only known ``delta.*`` table properties, so
@@ -105,7 +105,7 @@ class RetentionPolicy:
         retained table metadata, rather than in rejected custom properties.
         """
         return (
-            "CVFF segregated bronze table (raw validated envelopes); "
+            f"{scope_label} segregated bronze table (raw validated envelopes); "
             f"retention: hot={self.hot_days}d, cold={self.cold_years}y"
         )
 
@@ -219,7 +219,11 @@ def append_bronze(
 
     policy = retention or RetentionPolicy()
     table_uri = writer.guard_write("bronze", events, kafka_topic)
-    return append_events(table_uri, events, table_description=policy.as_table_description())
+    return append_events(
+        table_uri,
+        events,
+        table_description=policy.as_table_description(writer.scope.value.upper()),
+    )
 
 
 def append_silver(

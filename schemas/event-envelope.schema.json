@@ -46,7 +46,10 @@
         "confidential",
         "restricted",
         "highly_restricted",
-        "fiduciary_segregated"
+        "fiduciary_segregated",
+        "seafarer_confidential",
+        "fisheries_operational",
+        "isr_classified"
       ]
     },
     "source_system": {
@@ -65,6 +68,16 @@
     },
     "payload": {
       "type": "object"
+    },
+    "record_classification": {
+      "type": "string",
+      "description": "Optional per-record clearance label persisted as a column for row-level filtering; mandatory for isr scope records.",
+      "enum": [
+        "UNCLASSIFIED",
+        "RESTRICTED",
+        "CONFIDENTIAL",
+        "SECRET"
+      ]
     }
   }
 }

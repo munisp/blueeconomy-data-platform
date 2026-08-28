@@ -76,7 +76,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--lakehouse-scope",
         required=True,
-        choices=("platform", "cvff"),
+        choices=tuple(scope.value for scope in LakehouseScope),
         help="Segregated lakehouse scope this consumer is authorized to write.",
     )
     parser.add_argument("--table-uri", required=True)
@@ -196,6 +196,24 @@ def collect_messages(
     return events, messages
 
 
+def enforce_record_classification(events: list[dict[str, Any]], scope: LakehouseScope) -> None:
+    """Fail closed when a classified-scope record lacks its per-record clearance label.
+
+    Every event written to the ISR scope must carry a validated
+    ``record_classification`` label (enforced by the event envelope and
+    :func:`blueeconomy_data_platform.ingest.normalize_event`); the label is
+    persisted as a column so readers apply row-level clearance filtering.
+    """
+    if scope is not LakehouseScope.ISR:
+        return
+    for event in events:
+        if not isinstance(event.get("record_classification"), str):
+            raise ValueError(
+                f"isr scope record {event.get('event_id')!r} is missing its "
+                "record_classification label; unlabelled classified records are rejected"
+            )
+
+
 def commit_messages(consumer: Consumer, messages: list[Message]) -> dict[str, int]:
     offsets: dict[str, int] = {}
     latest_by_partition: dict[tuple[str, int], Message] = {}
@@ -261,6 +279,7 @@ def main() -> None:
             arguments.idle_timeout_seconds,
         )
         enforce_event_scope(events, scope)
+        enforce_record_classification(events, scope)
         table_version, records_written, records_already_present = append_events(
             arguments.table_uri, events
         )

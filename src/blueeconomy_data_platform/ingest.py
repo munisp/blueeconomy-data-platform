@@ -155,7 +155,16 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     if correlation_id is not None:
         correlation_id = require_canonical_text(correlation_id, "correlation_id", 256)
 
-    return {
+    record_classification = event.get("record_classification")
+    if record_classification is not None:
+        # Row-level clearance label, persisted as a column; unknown labels fail closed.
+        from blueeconomy_data_platform.access_policy import Clearance
+
+        record_classification = Clearance.from_label(
+            require_canonical_text(record_classification, "record_classification", 32)
+        ).label
+
+    normalized = {
         "event_id": require_canonical_text(event["event_id"], "event_id", 256),
         "event_type": require_canonical_text(event["event_type"], "event_type", 128),
         "producer": require_canonical_text(event["producer"], "producer", 256),
@@ -170,6 +179,9 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         "payload_json": payload_json,
         "ingested_at": datetime.now(UTC),
     }
+    if record_classification is not None:
+        normalized["record_classification"] = record_classification
+    return normalized
 
 
 def validate_maritime_position(payload: Any) -> None:
