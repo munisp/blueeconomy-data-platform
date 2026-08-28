@@ -37,7 +37,7 @@ readonly topic="ports.events.local"
   --create --if-not-exists --topic "$topic" --partitions 1 --replication-factor 1
 
 cat > "$work/event.ndjson" <<'JSON'
-{"event_id":"local-kafka-event-0001","event_type":"safety.telemetry.validated","producer":"blueeconomy-waterway-safety","occurred_at":"2026-08-12T12:00:00Z","recorded_at":"2026-08-12T12:00:01Z","data_classification":"internal","source_system":"local-kafka-conformance","source_record_reference":"local-kafka-record-0001","correlation_id":"local-kafka-correlation-0001","payload":{"device_id":"device-local-conformance","gateway_id":"gateway-local-conformance","source_sequence":1,"payload_sha256":"277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9","payload_byte_count":5}}
+{"envelopeVersion":"1.0","eventId":"0a1b2c3d-4e5f-4061-8273-849506a7b8c9","eventType":"safety.telemetry.validated","occurredAt":"2026-08-12T12:00:00Z","producer":"blueeconomy-waterway-safety","correlationId":"local-kafka-correlation-0001","fhir":{"resourceType":"Bundle","type":"message","entry":[{"resource":{"device_id":"device-local-conformance","gateway_id":"gateway-local-conformance","source_sequence":1,"payload_sha256":"277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9","payload_byte_count":5}}]},"provenance":{"principalId":"svc-waterway-safety","principalRole":"telemetry-gateway","signature":"277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9","ledgerCommitHash":"277089d91c0bdf4f2e6862ba7e4a07605119431f5d13f726dd352b06f1b206a9"},"classification":"INTERNAL"}
 JSON
 "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server 127.0.0.1:59092 --topic "$topic" < "$work/event.ndjson"

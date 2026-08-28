@@ -22,6 +22,12 @@ import pyarrow as pa
 from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import TableNotFoundError
 
+from blueeconomy_data_platform.access_policy import (
+    AccessDeniedError,
+    Clearance,
+    filter_records_by_clearance,
+    normalize_clearance,
+)
 from blueeconomy_data_platform.ingest import require_canonical_text
 from blueeconomy_data_platform.segregation import (
     BoundaryViolationError,
@@ -58,6 +64,7 @@ EXPORT_CONSIGNMENT_SCHEMA = pa.schema(
         pa.field("max_temperature_celsius", pa.float64()),
         pa.field("coldchain_digest_sha256", pa.string(), nullable=False),
         pa.field("export_reference", pa.string()),
+        pa.field("record_classification", pa.string(), nullable=False),
         pa.field("source_event_ids_json", pa.string(), nullable=False),
         pa.field("assembled_at", pa.timestamp("us", tz="UTC"), nullable=False),
     ]
@@ -109,6 +116,29 @@ def _coldchain_digest(samples: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _event_clearance_floor(event: dict[str, Any], event_id: str) -> Clearance:
+    """Resolve a source event's clearance floor, failing closed at the highest restriction.
+
+    An event without a persisted ``record_classification`` label is treated as
+    SECRET (the highest restriction) so unlabelled source data can never
+    weaken the clearance floor of the assembled consignment; an unknown label
+    fails closed.
+    """
+    label = event.get("record_classification")
+    if label is None:
+        return Clearance.SECRET
+    if not isinstance(label, str):
+        raise ValueError(
+            f"fisheries event {event_id!r} record_classification must be a clearance label"
+        )
+    try:
+        return Clearance.from_label(label)
+    except ValueError as error:
+        raise ValueError(
+            f"fisheries event {event_id!r} carries an unknown record_classification: {error}"
+        ) from error
+
+
 def build_consignment_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Assemble one traceable record per consignment from fisheries bronze events.
 
@@ -118,6 +148,10 @@ def build_consignment_records(events: list[dict[str, Any]]) -> list[dict[str, An
     are optional evidence attached to the same consignment. The coldchain
     digest commits to the ordered set of ``(event_id, occurred_at,
     temperature_celsius)`` samples so tampering with any sample changes it.
+    Each assembled record carries a ``record_classification`` clearance floor
+    equal to the most restrictive label among its source events (unlabelled
+    sources default to SECRET), so clearance-filtered readers never see a
+    consignment above their clearance.
     """
     if not events:
         raise ValueError("refusing to assemble consignments from an empty event batch")
@@ -135,7 +169,17 @@ def build_consignment_records(events: list[dict[str, Any]]) -> list[dict[str, An
         payload = _parse_payload(event)
         consignment_id = _consignment_id(payload, event_id)
         group = groups.setdefault(
-            consignment_id, {"catch": [], "custody": [], "coldchain": [], "export": []}
+            consignment_id,
+            {
+                "catch": [],
+                "custody": [],
+                "coldchain": [],
+                "export": [],
+                "clearance_floor": Clearance.UNCLASSIFIED,
+            },
+        )
+        group["clearance_floor"] = max(
+            group["clearance_floor"], _event_clearance_floor(event, event_id)
         )
         if event_type.startswith(CATCH_EVENT_TYPE_PREFIX):
             group["catch"].append((event, payload))
@@ -217,6 +261,7 @@ def build_consignment_records(events: list[dict[str, Any]]) -> list[dict[str, An
                 "max_temperature_celsius": max(temperatures) if temperatures else None,
                 "coldchain_digest_sha256": _coldchain_digest(coldchain_samples),
                 "export_reference": export_reference,
+                "record_classification": group["clearance_floor"].label,
                 "source_event_ids_json": json.dumps(source_ids),
                 "assembled_at": assembled_at,
             }
@@ -253,11 +298,15 @@ def assemble_export_consignment_gold(
         raise ValueError(
             "cannot assemble export consignments before the fisheries bronze table exists"
         ) from None
-    events = (
-        DeltaTable(bronze_uri)
-        .to_pyarrow_table(columns=["event_id", "event_type", "occurred_at", "payload_json"])
-        .to_pylist()
-    )
+    bronze = DeltaTable(bronze_uri)
+    columns = ["event_id", "event_type", "occurred_at", "payload_json"]
+    bronze_fields = set(bronze.schema().to_arrow().names)
+    if "record_classification" in bronze_fields:
+        # Persisted per-record clearance labels set each consignment's
+        # clearance floor; a bronze track without the column treats every
+        # source event as unlabelled (highest restriction).
+        columns.append("record_classification")
+    events = bronze.to_pyarrow_table(columns=columns).to_pylist()
     records = build_consignment_records(events)
     table_uri = export_consignment_table_uri(writer)
     write_deltalake(
@@ -271,10 +320,41 @@ def assemble_export_consignment_gold(
     return table.version(), len(records)
 
 
+def read_export_consignments(
+    writer: SegregatedDeltaWriter,
+    clearance: Clearance | str | None,
+) -> list[dict[str, Any]]:
+    """Read gold export consignments visible at the claimed clearance.
+
+    This is the serving path for the consignment export: every row passes
+    through :func:`filter_records_by_clearance`, so a consignment whose
+    clearance floor exceeds the claim — or whose label is missing or
+    unknown — is withheld. A missing or invalid clearance claim fails
+    closed.
+    """
+    if writer.scope is not LakehouseScope.FISHERIES:
+        raise BoundaryViolationError(
+            "export consignment reads are only defined for the fisheries boundary"
+        )
+    level = normalize_clearance(clearance)
+    if level is None:
+        raise AccessDeniedError("a clearance claim is required to read export consignments")
+    table_uri = export_consignment_table_uri(writer)
+    try:
+        DeltaTable(table_uri, without_files=True)
+    except TableNotFoundError:
+        raise ValueError(
+            "cannot read export consignments before the gold table is assembled"
+        ) from None
+    rows = DeltaTable(table_uri).to_pyarrow_table().to_pylist()
+    return [dict(record) for record in filter_records_by_clearance(rows, level)]
+
+
 __all__ = [
     "EXPORT_CONSIGNMENT_SCHEMA",
     "EXPORT_CONSIGNMENT_TABLE_NAME",
     "assemble_export_consignment_gold",
     "build_consignment_records",
     "export_consignment_table_uri",
+    "read_export_consignments",
 ]

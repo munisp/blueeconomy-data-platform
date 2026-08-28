@@ -24,6 +24,8 @@ from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import CommitFailedError, TableNotFoundError
 from jsonschema import Draft202012Validator, FormatChecker
 
+from blueeconomy_data_platform.segregation import map_canonical_classification
+
 MAX_RECORDS_PER_BATCH = 100_000
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024
@@ -123,7 +125,8 @@ def read_and_validate_events(
                 raise ValueError(
                     f"input line {line_number} fails event-envelope validation: {messages}"
                 )
-            event_id = require_canonical_text(event["event_id"], "event_id", 256)
+            event = map_canonical_envelope(event)
+            event_id = event["event_id"]
             if event_id in event_ids:
                 raise ValueError(f"input contains duplicate event_id {event_id!r}")
             event_ids.add(event_id)
@@ -136,6 +139,61 @@ def read_and_validate_events(
     if not events:
         raise ValueError("input contains no event records")
     return events
+
+
+def map_canonical_envelope(document: dict[str, Any]) -> dict[str, Any]:
+    """Project a schema-validated canonical envelope into the internal event shape.
+
+    Producers emit the canonical platform contract (camelCase field names, a
+    FHIR R4 message Bundle, a provenance block and the canonical
+    classification vocabulary). The lakehouse retains the internal snake_case
+    event model: the FHIR message entry's primary resource becomes the
+    retained payload with the provenance block attached, and the canonical
+    classification is mapped to the internal lowercase per-scope label.
+    Anything unexpected fails closed.
+    """
+    event_id = require_canonical_text(document["eventId"], "eventId", 256)
+    event_type = require_canonical_text(document["eventType"], "eventType", 128)
+    producer = require_canonical_text(document["producer"], "producer", 256)
+    bundle = document["fhir"]
+    if not isinstance(bundle, dict):
+        raise ValueError("fhir must be a FHIR R4 message Bundle object")
+    entries = bundle.get("entry")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("fhir bundle must carry at least one message entry")
+    first_entry = entries[0]
+    if not isinstance(first_entry, dict):
+        raise ValueError("fhir bundle entries must be objects")
+    resource = first_entry.get("resource")
+    if not isinstance(resource, dict) or not resource:
+        raise ValueError("fhir message entry resource must be a non-empty object")
+    if "provenance" in resource:
+        raise ValueError("fhir message entry resource must not redefine provenance")
+    provenance = document["provenance"]
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be an object")
+    ledger_commit_hash = require_canonical_text(
+        provenance["ledgerCommitHash"], "provenance.ledgerCommitHash", 512
+    )
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "producer": producer,
+        "occurred_at": document["occurredAt"],
+        # The canonical envelope carries only occurredAt; the lakehouse
+        # records the same instant as the observation time.
+        "recorded_at": document["occurredAt"],
+        "data_classification": map_canonical_classification(document["classification"], event_type),
+        "source_system": producer,
+        "source_record_reference": ledger_commit_hash,
+        "correlation_id": document.get("correlationId"),
+        "payload": {**resource, "provenance": provenance},
+        **(
+            {"record_classification": document["recordClassification"]}
+            if document.get("recordClassification") is not None
+            else {}
+        ),
+    }
 
 
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:

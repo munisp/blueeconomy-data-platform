@@ -134,7 +134,14 @@ class KafkaRecordMetadata:
 
 
 def extract_ledger_commit_hash(event: dict[str, Any]) -> str:
-    """Extract and validate the CVFF ``ledgerCommitHash`` from a bronze payload."""
+    """Extract and validate the CVFF ``ledgerCommitHash`` from a bronze payload.
+
+    Canonical-ingested bronze payloads carry the FHIR message entry resource
+    with the envelope provenance block attached, so the commit hash is read
+    from ``provenance.ledgerCommitHash``; a top-level ``ledgerCommitHash`` is
+    still accepted for directly projected payloads. Anything else fails
+    closed.
+    """
     payload_json = event.get("payload_json")
     if not isinstance(payload_json, str):
         raise ValueError("bronze event is missing payload_json")
@@ -142,6 +149,10 @@ def extract_ledger_commit_hash(event: dict[str, Any]) -> str:
     if not isinstance(payload, dict):
         raise ValueError("cvff payload must be a JSON object")
     ledger_hash = payload.get("ledgerCommitHash")
+    if ledger_hash is None:
+        provenance = payload.get("provenance")
+        if isinstance(provenance, dict):
+            ledger_hash = provenance.get("ledgerCommitHash")
     if not isinstance(ledger_hash, str) or not LEDGER_COMMIT_HASH_PATTERN.fullmatch(ledger_hash):
         raise ValueError(
             "cvff payload must carry a ledgerCommitHash of 64 lowercase hexadecimal characters"

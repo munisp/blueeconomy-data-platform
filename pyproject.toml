@@ -30,6 +30,7 @@ dev = [
 [project.scripts]
 blueeconomy-ingest-events = "blueeconomy_data_platform.ingest:main"
 blueeconomy-ingest-kafka = "blueeconomy_data_platform.kafka_ingest:main"
+blueeconomy-gold-assembly = "blueeconomy_data_platform.gold_assembly:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blueeconomy_data_platform"]

@@ -1,0 +1,40 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "c9d0e1f2-a3b4-4c5d-8e6f-708192a3b4c5",
+  "eventType": "ports.gate.scan.v1",
+  "occurredAt": "2026-08-12T12:15:00Z",
+  "producer": "s1-port-interoperability",
+  "correlationId": "corr-gate-scan-000771",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "timestamp": "2026-08-12T12:15:00Z",
+    "entry": [
+      {
+        "fullUrl": "urn:uuid:d0e1f2a3-b4c5-4d6e-8f70-8192a3b4c5d6",
+        "resource": {
+          "resourceType": "Basic",
+          "id": "gate-scan-000771",
+          "code": { "text": "ports.gate.scan.v1" },
+          "extension": [
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/domain-payload",
+              "valueString": "{\"truck_plate\":\"KJA-445-XB\",\"direction\":\"in\",\"terminal\":\"apapa-t1\"}"
+            },
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/terminal",
+              "valueString": "apapa-t1"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-port-interoperability",
+    "principalRole": "gate-operator",
+    "signature": "sha256:2a3b4c5d6e7f8091a2b3c4d5e6f70819c8f4a1b2d3e40516273849506a7b8c9d0e",
+    "ledgerCommitHash": "8192a3b4c5d6e7f8091a2b3c4d5e6f702a3b4c5d6e7f8091a2b3c4d5e6f70819"
+  },
+  "classification": "INTERNAL"
+}

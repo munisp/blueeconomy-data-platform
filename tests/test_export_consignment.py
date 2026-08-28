@@ -159,6 +159,58 @@ def test_gold_assembly_over_fisheries_scope(tmp_path: Path) -> None:
     assert rows["CONS-2026-0001"]["export_reference"] == "EXP-8899"
 
 
+def test_consignment_clearance_floor_tracks_most_restrictive_source() -> None:
+    events = consignment_events()
+    for event in events:
+        event["record_classification"] = "RESTRICTED"
+    events[2]["record_classification"] = "CONFIDENTIAL"
+    record = build_consignment_records(events)[0]
+    assert record["record_classification"] == "CONFIDENTIAL"
+    # An unknown source label fails assembly closed.
+    events = consignment_events()
+    events[1]["record_classification"] = "TOP-SECRET"
+    with pytest.raises(ValueError, match="unknown record_classification"):
+        build_consignment_records(events)
+
+
+def test_export_consignment_read_filters_by_clearance(tmp_path: Path) -> None:
+    from blueeconomy_data_platform.access_policy import AccessDeniedError
+    from blueeconomy_data_platform.export_consignment import read_export_consignments
+
+    writer = fisheries_writer(tmp_path)
+    labelled = consignment_events("CONS-2026-0001")
+    for event in labelled:
+        event["record_classification"] = "RESTRICTED"
+    append_bronze(writer, labelled + consignment_events("CONS-2026-0002"), kafka_topic=None)
+    version, count = assemble_export_consignment_gold(writer)
+    assert count == 2
+
+    rows = {
+        row["consignment_id"]: row["record_classification"]
+        for row in DeltaTable(export_consignment_table_uri(writer)).to_pyarrow_table().to_pylist()
+    }
+    assert rows == {"CONS-2026-0001": "RESTRICTED", "CONS-2026-0002": "SECRET"}
+
+    assert [row["consignment_id"] for row in read_export_consignments(writer, "RESTRICTED")] == [
+        "CONS-2026-0001"
+    ]
+    assert {row["consignment_id"] for row in read_export_consignments(writer, "SECRET")} == {
+        "CONS-2026-0001",
+        "CONS-2026-0002",
+    }
+    # Missing and unknown clearance claims fail closed.
+    with pytest.raises(AccessDeniedError):
+        read_export_consignments(writer, None)
+    with pytest.raises(AccessDeniedError):
+        read_export_consignments(writer, "TOP-SECRET")
+    # Reads are bound to the fisheries boundary and the assembled gold table.
+    cvff_writer = SegregatedDeltaWriter(LakehouseScope.CVFF, str(tmp_path / "cvff"))
+    with pytest.raises(BoundaryViolationError, match="fisheries boundary"):
+        read_export_consignments(cvff_writer, "SECRET")
+    with pytest.raises(ValueError, match="before the gold table is assembled"):
+        read_export_consignments(fisheries_writer(tmp_path / "empty"), "SECRET")
+
+
 def test_gold_assembly_requires_fisheries_scope(tmp_path: Path) -> None:
     for scope, root in (
         (LakehouseScope.CVFF, "cvff"),

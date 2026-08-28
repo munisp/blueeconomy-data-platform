@@ -55,7 +55,7 @@ The script runs Ruff formatting/linting, strict mypy, pytest with a real local D
 
 ## Data authority
 
-The schema requires a governed classification (`public`, `internal`, `confidential`, `restricted`, `highly_restricted`, `fiduciary_segregated`, `seafarer_confidential`, `fisheries_operational` or `isr_classified`) plus source-system and source-record references, with an optional per-record `record_classification` clearance label (mandatory for ISR scope ingestion). These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
+The committed schema is the canonical platform event envelope (`blueeconomy.contracts.v1.EventEnvelope`, envelopeVersion `1.0`): camelCase `eventId`/`eventType`/`occurredAt`/`producer`/`correlationId`, the domain resource carried as the first entry of a FHIR R4 message `Bundle` under `fhir`, a `provenance` block (`principalId`, `principalRole`, `signature`, `ledgerCommitHash`) and the canonical `classification` vocabulary (`FIDUCIARY_SEGREGATED`, `CONFIDENTIAL`, `RESTRICTED`, `INTERNAL`, `PUBLIC`), with an optional per-record `recordClassification` clearance label (mandatory for ISR scope ingestion). At ingestion the canonical classification is mapped onto the internal lowercase per-scope labels (`fiduciary_segregated`, `seafarer_confidential`, `fisheries_operational`, `isr_classified` or the platform labels) from the classification and the event type's governed namespace, so a classification can never be laundered across a segregation boundary; anything outside the canonical contract fails closed. These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
 
 ## Fiduciary segregation (Workstream C / CVFF)
 
@@ -112,7 +112,30 @@ Unknown roles, unknown schemas and empty claim sets are denied. No governance ro
 
 ### Export consignment traceability (Workstream E)
 
-`blueeconomy_data_platform.export_consignment` builds the fisheries gold-layer consignment view. `build_consignment_records` groups fisheries bronze events by `payload.consignmentId` — exactly one `fisheries.catch.*` event (species code, catch weight), the `fisheries.custody.*` transfer trail, `coldchain.*` temperature samples (range-validated, reduced to a tamper-evident SHA-256 digest of the ordered `(event_id, occurred_at, temperature_celsius)` samples) and the optional `export.*` declaration reference. `assemble_export_consignment_gold` rebuilds `<root>/fisheries/fisheries_gold/export_consignments` atomically from bronze under the declared `EXPORT_CONSIGNMENT_SCHEMA` (pyarrow). Assembly fails closed on missing/duplicate catch events, malformed consignment IDs, implausible temperatures or ungoverned event families, and only a fisheries-scope writer may assemble.
+`blueeconomy_data_platform.export_consignment` builds the fisheries gold-layer consignment view. `build_consignment_records` groups fisheries bronze events by `payload.consignmentId` — exactly one `fisheries.catch.*` event (species code, catch weight), the `fisheries.custody.*` transfer trail, `coldchain.*` temperature samples (range-validated, reduced to a tamper-evident SHA-256 digest of the ordered `(event_id, occurred_at, temperature_celsius)` samples) and the optional `export.*` declaration reference. `assemble_export_consignment_gold` rebuilds `<root>/fisheries/fisheries_gold/export_consignments` atomically from bronze under the declared `EXPORT_CONSIGNMENT_SCHEMA` (pyarrow). Assembly fails closed on missing/duplicate catch events, malformed consignment IDs, implausible temperatures or ungoverned event families, and only a fisheries-scope writer may assemble. Every assembled consignment carries a `record_classification` clearance floor equal to the most restrictive label among its source events — an unlabelled source defaults to SECRET, the highest restriction — and `read_export_consignments(writer, clearance)` is the serving read path: every row passes through `access_policy.filter_records_by_clearance`, so rows above the claimed clearance (or with missing/unknown labels) are withheld and a missing or unknown clearance claim is denied.
+
+### Gold-layer assembly and scheduling
+
+`blueeconomy-gold-assembly` is the scheduled orchestration entry point for the gold layer. One invocation runs one governed assembly pass for a single segregated scope, configured entirely through environment variables (fail closed on anything missing or invalid):
+
+| Variable | Requirement |
+|---|---|
+| `BLUEECONOMY_GOLD_SCOPE` | `cvff` runs the silver→gold ledger-commitment rollup; `fisheries` runs the export-consignment gold assembly plus the clearance-filtered export. Any other scope fails closed. |
+| `BLUEECONOMY_GOLD_SCOPE_ROOT_URI` | The segregated scope root URI; `SegregatedDeltaWriter` enforces the scope boundary on it. |
+| `BLUEECONOMY_GOLD_REPORT` | Non-secret JSON run-report path (counts, table version, clearance; no payload data). |
+| `BLUEECONOMY_GOLD_EXPORT_PATH` | Required for `fisheries`: JSON export of the consignment rows visible at the configured clearance. |
+| `BLUEECONOMY_GOLD_CLEARANCE` | Optional clearance claim for the export read; defaults to `UNCLASSIFIED`, the most restrictive clearance, so an unconfigured run exports nothing above the UNCLASSIFIED floor. |
+
+```bash
+BLUEECONOMY_GOLD_SCOPE=fisheries \
+BLUEECONOMY_GOLD_SCOPE_ROOT_URI=s3://approved-lakehouse/fisheries \
+BLUEECONOMY_GOLD_REPORT=/approved/evidence/gold-assembly-report.json \
+BLUEECONOMY_GOLD_EXPORT_PATH=/approved/evidence/consignment-export.json \
+BLUEECONOMY_GOLD_CLEARANCE=RESTRICTED \
+blueeconomy-gold-assembly
+```
+
+Scheduling: run one invocation per scope on a bounded cadence, after the ingestion window closes. A cron entry (for example `*/15 * * * *` per scope with a per-scope lock) is sufficient for batch cadences; on the platform's Temporal deployment, model each scope as a scheduled workflow with a single activity per invocation — the command is idempotent (gold tables are atomically rebuilt derived state), so a retried or overlapping run never duplicates or corrupts gold content. The run report is the operations evidence for each scheduled pass.
 
 ### Cloud-agnostic storage configuration
 

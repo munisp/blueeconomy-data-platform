@@ -1,0 +1,35 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "b2e5f708-1a3c-4d6e-8f90-a2b4c6d8e0f1",
+  "eventType": "export.consignment.created.v1",
+  "occurredAt": "2026-08-12T12:10:00Z",
+  "producer": "fisheries-traceability",
+  "correlationId": "b2e5f708-1a3c-4d6e-8f90-a2b4c6d8e0f1",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Basic",
+          "internalEventType": "export.consignment.created",
+          "subjectId": "CONS-2026-0001",
+          "consignmentId": "CONS-2026-0001",
+          "speciesCode": "TUNA-YFT",
+          "catchWeightKg": 125.5,
+          "exportReference": "EXP-8899",
+          "principal_id": "svc-fisheries-traceability",
+          "principal_role": "fisheries-operations",
+          "bundle_hash_sha256": "e6f708192a3b4c5d6e7f8091a2b3c4d59d1c7f2ab34e56c8901de4f6a2b3c4d5"
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-fisheries-traceability",
+    "principalRole": "fisheries-operations",
+    "signature": "f708192a3b4c5d6e7f8091a2b3c4d5e6c8f4a1b2d3e40516273849506a7b8c9d0e",
+    "ledgerCommitHash": "e6f708192a3b4c5d6e7f8091a2b3c4d59d1c7f2ab34e56c8901de4f6a2b3c4d5"
+  },
+  "classification": "CONFIDENTIAL"
+}

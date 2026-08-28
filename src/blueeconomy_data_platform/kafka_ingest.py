@@ -21,6 +21,7 @@ from blueeconomy_data_platform.ingest import (
     MAX_LINE_BYTES,
     append_events,
     load_schema,
+    map_canonical_envelope,
     normalize_event,
     reject_non_finite_constant,
     require_canonical_text,
@@ -158,7 +159,7 @@ def decode_event(value: bytes | None, validator: Draft202012Validator) -> dict[s
     if errors:
         messages = "; ".join(error.message for error in errors)
         raise ValueError(f"Kafka event fails event-envelope validation: {messages}")
-    return normalize_event(document)
+    return normalize_event(map_canonical_envelope(document))
 
 
 def collect_messages(

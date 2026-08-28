@@ -1,0 +1,36 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "3f6b2a1e-9c4d-4e8a-b7f1-2d5c8a0e6b41",
+  "eventType": "ferries.ticketing.ticket.v1",
+  "occurredAt": "2026-08-12T12:00:00Z",
+  "producer": "ferry-ticketing",
+  "correlationId": "3f6b2a1e-9c4d-4e8a-b7f1-2d5c8a0e6b41",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Basic",
+          "internalEventType": "ferry.ticket.issued",
+          "subjectId": "ticket-2026-000184",
+          "ticket_id": "ticket-2026-000184",
+          "route_id": "lagos-calabar-07",
+          "fare_amount": "4500.00",
+          "currency": "NGN",
+          "principal_id": "svc-ferry-ticketing",
+          "principal_role": "ticketing-agent",
+          "state": "issued",
+          "ledger_transfer_id": "9d1c7f2ab34e56c8901de4f6a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5"
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-ferry-ticketing",
+    "principalRole": "ticketing-agent",
+    "signature": "c8f4a1b2d3e40516273849506a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7",
+    "ledgerCommitHash": "9d1c7f2ab34e56c8901de4f6a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5"
+  },
+  "classification": "INTERNAL"
+}

@@ -95,6 +95,77 @@ def scope_for_classification(data_classification: str) -> LakehouseScope:
     )
 
 
+CANONICAL_CLASSIFICATIONS = frozenset(
+    {"FIDUCIARY_SEGREGATED", "CONFIDENTIAL", "RESTRICTED", "INTERNAL", "PUBLIC"}
+)
+
+# Canonical (producer-facing) classifications mapped onto the platform scope's
+# internal lowercase labels. The segregated scopes each retain their single
+# internal label; the canonical vocabulary never crosses a scope boundary.
+CANONICAL_TO_PLATFORM_LABEL: dict[str, str] = {
+    "PUBLIC": "public",
+    "INTERNAL": "internal",
+    "CONFIDENTIAL": "confidential",
+    "RESTRICTED": "restricted",
+}
+
+
+def scope_for_event_type(event_type: str) -> LakehouseScope:
+    """Map an envelope ``eventType`` namespace to its lakehouse scope, failing closed.
+
+    Envelope event types share the governed Kafka topic namespaces (for
+    example ``cvff.disbursement.v1`` on ``cvff.*`` topics), so the same
+    prefix boundary applies.
+    """
+    for scope, prefixes in SCOPE_TOPIC_PREFIXES.items():
+        if event_type.startswith(prefixes):
+            return scope
+    raise BoundaryViolationError(
+        f"eventType {event_type!r} is outside the governed event namespaces"
+    )
+
+
+def map_canonical_classification(classification: str, event_type: str) -> str:
+    """Map a canonical envelope classification to its internal scope label.
+
+    Producers emit the canonical platform vocabulary
+    (``FIDUCIARY_SEGREGATED``/``CONFIDENTIAL``/``RESTRICTED``/``INTERNAL``/
+    ``PUBLIC``); the lakehouse retains the internal lowercase per-scope
+    labels. The internal label is derived from the classification and the
+    event type's governed namespace so a classification can never be
+    laundered across a segregation boundary; anything unrecognized fails
+    closed.
+    """
+    if classification not in CANONICAL_CLASSIFICATIONS:
+        raise BoundaryViolationError(
+            f"canonical classification {classification!r} is not in the platform vocabulary"
+        )
+    if classification == "FIDUCIARY_SEGREGATED":
+        if scope_for_event_type(event_type) is not LakehouseScope.CVFF:
+            raise BoundaryViolationError(
+                f"FIDUCIARY_SEGREGATED event type {event_type!r} is outside the cvff boundary"
+            )
+        return FIDUCIARY_SEGREGATED_CLASSIFICATION
+    try:
+        scope = scope_for_event_type(event_type)
+    except BoundaryViolationError:
+        # Platform-scope producers may use event types outside the segregated
+        # namespaces (for example maritime.position.v1); the Kafka consumer's
+        # topic boundary remains the governing check for platform writes.
+        scope = LakehouseScope.PLATFORM
+    if scope is LakehouseScope.CVFF:
+        raise BoundaryViolationError(
+            f"cvff event type {event_type!r} must be classified FIDUCIARY_SEGREGATED"
+        )
+    if scope is LakehouseScope.SEAFARER:
+        return SEAFARER_CLASSIFICATION
+    if scope is LakehouseScope.FISHERIES:
+        return FISHERIES_CLASSIFICATION
+    if scope is LakehouseScope.ISR:
+        return ISR_CLASSIFICATION
+    return CANONICAL_TO_PLATFORM_LABEL[classification]
+
+
 def scope_for_topic(topic: str) -> LakehouseScope:
     """Map a Kafka topic namespace to its mandatory lakehouse scope, failing closed."""
     for scope, prefixes in SCOPE_TOPIC_PREFIXES.items():
