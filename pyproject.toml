@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "confluent-kafka==2.15.0",
+  "cryptography==43.0.1",
   "deltalake==1.6.2",
   "jsonschema==4.26.0",
   "pyarrow==25.0.1",

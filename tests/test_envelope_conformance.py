@@ -25,6 +25,7 @@ from blueeconomy_data_platform.segregation import (
     enforce_event_scope,
     scope_for_classification,
 )
+from signing_helpers import load_test_verifier, signed_envelope_bytes
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "envelopes"
 SCHEMA = Path(__file__).resolve().parents[1] / "schemas" / "event-envelope.schema.json"
@@ -84,7 +85,7 @@ def test_producer_envelope_validates_and_maps_to_scope(fixture_name: str) -> Non
     # The full Kafka decode path normalizes the envelope, retains the domain
     # resource and provenance in the payload, and passes the scope boundary
     # enforced by the scope's own writer.
-    normalized = decode_event(json.dumps(envelope).encode("utf-8"), validator)
+    normalized = decode_event(json.dumps(envelope).encode("utf-8"), validator, load_test_verifier())
     assert normalized["event_id"] == envelope["eventId"]
     assert normalized["event_type"] == envelope["eventType"]
     assert normalized["data_classification"] == label
@@ -99,7 +100,9 @@ def test_producer_envelope_validates_and_maps_to_scope(fixture_name: str) -> Non
 def test_producer_envelope_rejected_by_other_segregated_scopes(fixture_name: str) -> None:
     _, scope, _ = PRODUCER_EXPECTATIONS[fixture_name]
     validator = load_schema(SCHEMA)
-    normalized = decode_event(json.dumps(load_fixture(fixture_name)).encode("utf-8"), validator)
+    normalized = decode_event(
+        json.dumps(load_fixture(fixture_name)).encode("utf-8"), validator, load_test_verifier()
+    )
     # Every other scope's writer must reject the event: platform and
     # segregated scopes are mutually exclusive boundaries.
     for other in LakehouseScope:
@@ -113,7 +116,7 @@ def test_record_classification_maps_to_internal_clearance_label() -> None:
     validator = load_schema(SCHEMA)
     envelope = load_fixture("fisheries-traceability.json")
     envelope["recordClassification"] = "RESTRICTED"
-    normalized = decode_event(json.dumps(envelope).encode("utf-8"), validator)
+    normalized = decode_event(signed_envelope_bytes(envelope), validator, load_test_verifier())
     assert normalized["record_classification"] == "RESTRICTED"
     assert Clearance.from_label(normalized["record_classification"]) is Clearance.RESTRICTED
 
@@ -124,17 +127,17 @@ def test_canonical_mapping_fails_closed() -> None:
     envelope = load_fixture("ferry-ticketing.json")
     envelope["classification"] = "FIDUCIARY_SEGREGATED"
     with pytest.raises(BoundaryViolationError):
-        decode_event(json.dumps(envelope).encode("utf-8"), validator)
+        decode_event(signed_envelope_bytes(envelope), validator, load_test_verifier())
     # A cvff event type without FIDUCIARY_SEGREGATED fails closed.
     envelope = load_fixture("financial-controls.json")
     envelope["classification"] = "INTERNAL"
     with pytest.raises(BoundaryViolationError):
-        decode_event(json.dumps(envelope).encode("utf-8"), validator)
+        decode_event(signed_envelope_bytes(envelope), validator, load_test_verifier())
     # A classification outside the canonical vocabulary fails schema validation.
     envelope = load_fixture("ferry-ticketing.json")
     envelope["classification"] = "highly_restricted"
     with pytest.raises(ValueError, match="event-envelope validation"):
-        decode_event(json.dumps(envelope).encode("utf-8"), validator)
+        decode_event(json.dumps(envelope).encode("utf-8"), validator, load_test_verifier())
     # The retired snake_case dialect is rejected outright.
     with pytest.raises(ValueError, match="event-envelope validation"):
         decode_event(
@@ -152,4 +155,5 @@ def test_canonical_mapping_fails_closed() -> None:
                 }
             ).encode("utf-8"),
             validator,
+            load_test_verifier(),
         )

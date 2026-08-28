@@ -15,7 +15,9 @@
         "resource": {
           "resourceType": "Basic",
           "id": "gate-scan-000771",
-          "code": { "text": "ports.gate.scan.v1" },
+          "code": {
+            "text": "ports.gate.scan.v1"
+          },
           "extension": [
             {
               "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/domain-payload",
@@ -33,7 +35,7 @@
   "provenance": {
     "principalId": "svc-port-interoperability",
     "principalRole": "gate-operator",
-    "signature": "sha256:2a3b4c5d6e7f8091a2b3c4d5e6f70819c8f4a1b2d3e40516273849506a7b8c9d0e",
+    "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6InMxLXBvcnQtaW50ZXJvcGVyYWJpbGl0eS0wIn0.eyJjbGFzc2lmaWNhdGlvbiI6IklOVEVSTkFMIiwiY29ycmVsYXRpb25JZCI6ImNvcnItZ2F0ZS1zY2FuLTAwMDc3MSIsImVudmVsb3BlVmVyc2lvbiI6IjEuMCIsImV2ZW50SWQiOiJjOWQwZTFmMi1hM2I0LTRjNWQtOGU2Zi03MDgxOTJhM2I0YzUiLCJldmVudFR5cGUiOiJwb3J0cy5nYXRlLnNjYW4udjEiLCJmaGlyIjp7ImVudHJ5IjpbeyJmdWxsVXJsIjoidXJuOnV1aWQ6ZDBlMWYyYTMtYjRjNS00ZDZlLThmNzAtODE5MmEzYjRjNWQ2IiwicmVzb3VyY2UiOnsiY29kZSI6eyJ0ZXh0IjoicG9ydHMuZ2F0ZS5zY2FuLnYxIn0sImV4dGVuc2lvbiI6W3sidXJsIjoiaHR0cHM6Ly9ibHVlZWNvbm9teS5nb3YubmcvZmhpci9TdHJ1Y3R1cmVEZWZpbml0aW9uL2RvbWFpbi1wYXlsb2FkIiwidmFsdWVTdHJpbmciOiJ7XCJ0cnVja19wbGF0ZVwiOlwiS0pBLTQ0NS1YQlwiLFwiZGlyZWN0aW9uXCI6XCJpblwiLFwidGVybWluYWxcIjpcImFwYXBhLXQxXCJ9In0seyJ1cmwiOiJodHRwczovL2JsdWVlY29ub215Lmdvdi5uZy9maGlyL1N0cnVjdHVyZURlZmluaXRpb24vdGVybWluYWwiLCJ2YWx1ZVN0cmluZyI6ImFwYXBhLXQxIn1dLCJpZCI6ImdhdGUtc2Nhbi0wMDA3NzEiLCJyZXNvdXJjZVR5cGUiOiJCYXNpYyJ9fV0sInJlc291cmNlVHlwZSI6IkJ1bmRsZSIsInRpbWVzdGFtcCI6IjIwMjYtMDgtMTJUMTI6MTU6MDBaIiwidHlwZSI6Im1lc3NhZ2UifSwib2NjdXJyZWRBdCI6IjIwMjYtMDgtMTJUMTI6MTU6MDBaIiwicHJvZHVjZXIiOiJzMS1wb3J0LWludGVyb3BlcmFiaWxpdHkiLCJwcm92ZW5hbmNlIjp7ImxlZGdlckNvbW1pdEhhc2giOiI4MTkyYTNiNGM1ZDZlN2Y4MDkxYTJiM2M0ZDVlNmY3MDJhM2I0YzVkNmU3ZjgwOTFhMmIzYzRkNWU2ZjcwODE5IiwicHJpbmNpcGFsSWQiOiJzdmMtcG9ydC1pbnRlcm9wZXJhYmlsaXR5IiwicHJpbmNpcGFsUm9sZSI6ImdhdGUtb3BlcmF0b3IifX0.JNiCYTnkCJtUn68vfbAm7V5WidbiCZhy0K0ush-jE23h3f2X_timtFxeqa4EgsUTCL63zLq_cxHzqtmsn7hfAQ",
     "ledgerCommitHash": "8192a3b4c5d6e7f8091a2b3c4d5e6f702a3b4c5d6e7f8091a2b3c4d5e6f70819"
   },
   "classification": "INTERNAL"

@@ -16,6 +16,7 @@ from blueeconomy_data_platform.ingest import (
     validate_output_path,
     validate_table_uri,
 )
+from signing_helpers import sign_envelope
 
 
 def valid_event() -> dict[str, object]:
@@ -35,7 +36,7 @@ def valid_event() -> dict[str, object]:
         "provenance": {
             "principalId": "svc-approved-gateway",
             "principalRole": "gateway",
-            "signature": "a" * 64,
+            "signature": "",
             "ledgerCommitHash": "b" * 64,
         },
         "classification": "INTERNAL",
@@ -63,7 +64,10 @@ def schema_path() -> Path:
 
 
 def write_ndjson(path: Path, records: list[dict[str, object]]) -> None:
-    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    path.write_text(
+        "".join(json.dumps(sign_envelope(record)) + "\n" for record in records),
+        encoding="utf-8",
+    )
 
 
 def test_real_local_delta_ingestion_is_idempotent(tmp_path: Path) -> None:

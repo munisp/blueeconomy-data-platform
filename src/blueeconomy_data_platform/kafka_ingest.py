@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -31,6 +32,10 @@ from blueeconomy_data_platform.segregation import (
     enforce_event_scope,
     enforce_topic_scope,
     require_scope_table_uri,
+)
+from blueeconomy_data_platform.signature_verification import (
+    EnvelopeSignatureVerifier,
+    load_key_directory_from_env,
 )
 
 TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,248}$")
@@ -144,7 +149,19 @@ def validate_transport(arguments: argparse.Namespace) -> dict[str, Any]:
     return configuration
 
 
-def decode_event(value: bytes | None, validator: Draft202012Validator) -> dict[str, Any]:
+def decode_event(
+    value: bytes | None,
+    validator: Draft202012Validator,
+    verifier: EnvelopeSignatureVerifier,
+) -> dict[str, Any]:
+    """Decode one Kafka message into a normalized event, failing closed.
+
+    The envelope is schema-validated and then its provenance signature is
+    cryptographically verified against the startup-loaded key directory
+    (unknown kid, malformed JWS, payload mismatch or invalid signature are
+    rejected, logged and counted); unverified envelopes never reach
+    persistence.
+    """
     if value is None or len(value) == 0 or len(value) > MAX_LINE_BYTES:
         raise ValueError(f"Kafka message value must contain 1 to {MAX_LINE_BYTES} bytes")
     try:
@@ -159,12 +176,23 @@ def decode_event(value: bytes | None, validator: Draft202012Validator) -> dict[s
     if errors:
         messages = "; ".join(error.message for error in errors)
         raise ValueError(f"Kafka event fails event-envelope validation: {messages}")
+    # Signature verification canonicalizes under the ECMAScript numeric model
+    # (every JSON number is an IEEE-754 double), so the signed view is parsed
+    # with integers widened to float to match peer implementations exactly.
+    signed_view = json.loads(
+        value.decode("utf-8"),
+        parse_int=float,
+        parse_float=float,
+        parse_constant=reject_non_finite_constant,
+    )
+    verifier.verify(signed_view)
     return normalize_event(map_canonical_envelope(document))
 
 
 def collect_messages(
     consumer: Consumer,
     validator: Draft202012Validator,
+    verifier: EnvelopeSignatureVerifier,
     maximum: int,
     idle_timeout_seconds: float,
 ) -> tuple[list[dict[str, Any]], list[Message]]:
@@ -184,7 +212,7 @@ def collect_messages(
             if message_error.code() == KafkaError._PARTITION_EOF:
                 continue
             raise KafkaException(message_error)
-        event = decode_event(message.value(), validator)
+        event = decode_event(message.value(), validator, verifier)
         event_id = event["event_id"]
         if event_id in event_ids:
             raise ValueError(f"Kafka batch repeats event_id {event_id!r}")
@@ -271,11 +299,15 @@ def main() -> None:
         require_scope_table_uri(scope, arguments.table_uri)
         configuration = validate_transport(arguments)
         validator = load_schema(arguments.schema)
+        # Fail-closed: the consumer refuses to start without a readable
+        # producer public-key directory (KEY_DIRECTORY_PATH).
+        verifier = EnvelopeSignatureVerifier(load_key_directory_from_env())
         consumer = Consumer(configuration)
         consumer.subscribe([arguments.topic])
         events, messages = collect_messages(
             consumer,
             validator,
+            verifier,
             arguments.max_messages,
             arguments.idle_timeout_seconds,
         )
@@ -304,6 +336,11 @@ def main() -> None:
         )
         write_kafka_report(arguments.report, report)
         print(json.dumps(asdict(report), sort_keys=True))
+        logging.getLogger("blueeconomy_data_platform.kafka_ingest").info(
+            "ingest complete: signatures verified=%d rejected=%s",
+            verifier.metrics.verified,
+            verifier.metrics.rejected,
+        )
     except (KafkaException, OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"blueeconomy-ingest-kafka: {error}", file=sys.stderr)
         raise SystemExit(1) from error

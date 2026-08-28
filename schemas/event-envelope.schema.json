@@ -88,8 +88,10 @@
         },
         "signature": {
           "type": "string",
+          "description": "Fleet provenance signature: JWS compact serialization (EdDSA/Ed25519) over the JCS-canonicalized (RFC 8785) JSON of the full envelope excluding this field; protected header {\"alg\":\"EdDSA\",\"kid\":\"<producer>-<epoch>\"}. Verified against the mounted key directory (KEY_DIRECTORY_PATH); see blueeconomy-contracts docs/envelope-signature.md.",
           "minLength": 1,
-          "maxLength": 512
+          "maxLength": 2097152,
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
         },
         "ledgerCommitHash": {
           "type": "string",

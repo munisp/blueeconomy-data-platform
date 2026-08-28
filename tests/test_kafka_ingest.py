@@ -18,6 +18,7 @@ from blueeconomy_data_platform.kafka_ingest import (
     validate_transport,
 )
 from blueeconomy_data_platform.segregation import LakehouseScope
+from signing_helpers import load_test_verifier, signed_envelope_bytes
 
 
 def arguments(**overrides: object) -> argparse.Namespace:
@@ -73,9 +74,7 @@ def test_plaintext_requires_explicit_localhost_gate() -> None:
 def test_decode_event_enforces_committed_schema_and_normalization() -> None:
     schema = Path(__file__).parents[1] / "schemas" / "event-envelope.schema.json"
     validator = load_schema(schema)
-    normalized = decode_event(
-        json.dumps(valid_event(), separators=(",", ":")).encode("utf-8"), validator
-    )
+    normalized = decode_event(signed_envelope_bytes(valid_event()), validator, load_test_verifier())
     assert normalized["event_id"] == "2b3c4d5e-6f70-4819-8a2b-3c4d5e6f7081"
     assert json.loads(normalized["payload_json"])["payload_sha256"] == "a" * 64
 
@@ -86,7 +85,7 @@ def test_decode_event_rejects_undeclared_fields() -> None:
     event = valid_event()
     event["undeclared"] = True
     with pytest.raises(ValueError, match="event-envelope validation"):
-        decode_event(json.dumps(event).encode("utf-8"), validator)
+        decode_event(json.dumps(event).encode("utf-8"), validator, load_test_verifier())
 
 
 def test_report_cannot_overwrite_schema(tmp_path: Path) -> None:
@@ -146,7 +145,9 @@ def isr_uuid(ordinal: int) -> str:
 def test_isr_record_classification_label_is_persisted_as_column() -> None:
     schema = Path(__file__).parents[1] / "schemas" / "event-envelope.schema.json"
     validator = load_schema(schema)
-    normalized = decode_event(json.dumps(isr_event(isr_uuid(1))).encode("utf-8"), validator)
+    normalized = decode_event(
+        signed_envelope_bytes(isr_event(isr_uuid(1))), validator, load_test_verifier()
+    )
     assert normalized["record_classification"] == "SECRET"
     assert normalized["data_classification"] == "isr_classified"
     unlabelled = normalize_event(map_canonical_envelope(valid_event()))
@@ -157,7 +158,11 @@ def test_record_classification_label_fails_closed_on_unknown_value() -> None:
     schema = Path(__file__).parents[1] / "schemas" / "event-envelope.schema.json"
     validator = load_schema(schema)
     with pytest.raises(ValueError, match="event-envelope validation"):
-        decode_event(json.dumps(isr_event(isr_uuid(2), label="TOP-SECRET")).encode(), validator)
+        decode_event(
+            json.dumps(isr_event(isr_uuid(2), label="TOP-SECRET")).encode(),
+            validator,
+            load_test_verifier(),
+        )
     with pytest.raises(ValueError, match="clearance label"):
         normalize_event(map_canonical_envelope(isr_event(isr_uuid(3), label="Secret Squirrel")))
 
@@ -171,8 +176,16 @@ def test_isr_label_persists_as_delta_column_for_row_level_filtering(tmp_path: Pa
     schema = Path(__file__).parents[1] / "schemas" / "event-envelope.schema.json"
     validator = load_schema(schema)
     events = [
-        decode_event(json.dumps(isr_event(isr_uuid(6), label="SECRET")).encode(), validator),
-        decode_event(json.dumps(isr_event(isr_uuid(7), label="CONFIDENTIAL")).encode(), validator),
+        decode_event(
+            signed_envelope_bytes(isr_event(isr_uuid(6), label="SECRET")),
+            validator,
+            load_test_verifier(),
+        ),
+        decode_event(
+            signed_envelope_bytes(isr_event(isr_uuid(7), label="CONFIDENTIAL")),
+            validator,
+            load_test_verifier(),
+        ),
     ]
     enforce_record_classification(events, LakehouseScope.ISR)
     table_uri = str(tmp_path / "isr" / "isr_bronze" / "events")
