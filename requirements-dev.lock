@@ -4,6 +4,7 @@
 #
 #    pip-compile --extra=dev --generate-hashes --no-index --output-file=requirements-dev.lock pyproject.toml
 #
+
 arro3-core==0.8.1 \
     --hash=sha256:0501662cb3c7c6a05dcd6b998db55f9a97743aa571da42203733366c42166a7a \
     --hash=sha256:05e6d17b8c1fb1a217161eccd94191f8092a0a12893b0391d51cdf57a626acbf \
@@ -478,6 +479,10 @@ filelock==3.32.4 \
     --hash=sha256:22e58ca3b1ae3b98993b762d7338367ae64fe50252bf78d59da3bfebcdf1cedd \
     --hash=sha256:2bde2e4cf732e0153406d8a7bc80620ecf5e621fe0d25e41143c4e3b4733ff30
     # via cachecontrol
+geolibre-wasm==1.5.2 \
+    --hash=sha256:38c75a2efb13a7eb3bce25c5871a1b02e6cb7a3efb9f7268d5a5d0979d356e6f \
+    --hash=sha256:e739033d74ff0c600161a0f14cad21bcc02b4443afe498a4540e46016743c664
+    # via pyproject.toml
 hatchling==1.28.0 \
     --hash=sha256:4d50b02aece6892b8cd0b3ce6c82cb218594d3ec5836dbde75bf41a21ab004c8 \
     --hash=sha256:dc48722b68b3f4bbfa3ff618ca07cdea6750e7d03481289ffa8be1521d18a961
@@ -666,6 +671,10 @@ py-serializable==2.1.0 \
     --hash=sha256:9d5db56154a867a9b897c0163b33a793c804c80cee984116d02d49e4578fc103 \
     --hash=sha256:b56d5d686b5a03ba4f4db5e769dc32336e142fc3bd4d68a8c25579ebb0a67304
     # via cyclonedx-python-lib
+pyais==3.2.1 \
+    --hash=sha256:bebe0f37c12ee41548710c58bb5df201867a8e21ff520dbd67170a58ccecfbbe \
+    --hash=sha256:ff755ab8caeb617e7b2e0d97664e97f1ee5720dd783048d7366d7c764875b904
+    # via pyproject.toml
 pyarrow==25.0.1 \
     --hash=sha256:0b1edbb2f385a6a65e9711b62ba86ac54a7816a3f8d17bb3e8a5929d65fb2485 \
     --hash=sha256:0b726ad7e7b669be982b0c71c07fe4b037d654354130da79a7902a669e93a66b \
@@ -1048,6 +1057,20 @@ urllib3==2.7.0 \
     --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
     --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
     # via requests
+wasmtime==48.0.0 \
+    --hash=sha256:09cd5e14df80a3a8d447428a548583181c568ea2e617419d23600deff21d4b82 \
+    --hash=sha256:21fa500e70f3819a8c0539c3f0be6b3b81ec3c630bb90c47dba4d8a2c1d4c698 \
+    --hash=sha256:26fce3613fefbe29a28e9d659dca3326e800593858e5758cad086eb802b3b766 \
+    --hash=sha256:49c9ee43e9cf59ad7453ac65dce0cc4b885837904dd3cfd45faafe930defe14a \
+    --hash=sha256:50e1ea81a3bec537d00e076722dfdc48978a56ea24619d8153aa1f75b11796b9 \
+    --hash=sha256:58544d539053dff7bd4cf30c40d7a540862d683013c0dfa6ba46a063f5b682f7 \
+    --hash=sha256:62b241c8d5dfb59ff8af1ccaa5351f0ab7aba8cc872f7d80e0e3c95d54c13562 \
+    --hash=sha256:77f6b75db20be065e205e7af814d4e4f06784c3a00eb346e8c76148ecb4afe5a \
+    --hash=sha256:a55abf132fe238b843a963c68cd1a30d8f686c1bc75d8fbf042d8b7a1d51ee36 \
+    --hash=sha256:d8e94276ff6c0c5ce73ee16ccbacb00b3512a4b3a664749380705d81ee06a23c \
+    --hash=sha256:dba27d59209fac703e7d5753af78c2af2c1cd1ed735f520ec76dc31c60a05815 \
+    --hash=sha256:ea69889a3c51702e9da5f5f441027ca934f7758f8926a4ed167b0d6877f092e8
+    # via geolibre-wasm
 wrapt==2.3.0 \
     --hash=sha256:0a45ffae742ce91a16e11cb6c7cd71e7f9994f3cbd283b962ab093f5c6dcf525 \
     --hash=sha256:0bb2797048db0956348cb3058c33bc4184614f13231389cfbccc16a5d32780a7 \

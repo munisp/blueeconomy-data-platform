@@ -12,7 +12,9 @@ dependencies = [
   "confluent-kafka==2.15.0",
   "cryptography==43.0.1",
   "deltalake==1.6.2",
+  "geolibre-wasm==1.5.2",
   "jsonschema==4.26.0",
+  "pyais==3.2.1",
   "pyarrow==25.0.1",
 ]
 
@@ -31,7 +33,9 @@ dev = [
 [project.scripts]
 blueeconomy-ingest-events = "blueeconomy_data_platform.ingest:main"
 blueeconomy-ingest-kafka = "blueeconomy_data_platform.kafka_ingest:main"
+blueeconomy-ingest-vessels = "blueeconomy_data_platform.vessel_ingest:main"
 blueeconomy-gold-assembly = "blueeconomy_data_platform.gold_assembly:main"
+blueeconomy-retention-enforce = "blueeconomy_data_platform.retention:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blueeconomy_data_platform"]
@@ -50,5 +54,5 @@ strict = true
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
+module = ["pyarrow", "pyarrow.*", "pyais", "pyais.*", "geolibre_wasm", "geolibre_wasm.*"]
 ignore_missing_imports = true

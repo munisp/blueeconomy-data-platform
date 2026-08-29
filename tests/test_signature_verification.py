@@ -81,7 +81,8 @@ def envelope() -> dict[str, object]:
 
 def es_numeric_view(document: dict[str, object]) -> dict[str, object]:
     """Reparse under the ECMAScript numeric model used by the verifier."""
-    return json.loads(json.dumps(document), parse_int=float, parse_float=float)
+    view: dict[str, object] = json.loads(json.dumps(document), parse_int=float, parse_float=float)
+    return view
 
 
 class TestRfc8785Canonicalization:

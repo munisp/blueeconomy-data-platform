@@ -1,0 +1,24 @@
+# VCS and local state
+.git/
+.github/
+.gitignore
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.pyc
+
+# Development-only graphs and tooling (the image installs requirements.lock)
+requirements-dev.lock
+scripts_validate.py
+scripts/
+tests/
+integration/
+governance/
+
+# Build outputs and local evidence
+dist/
+build/
+*.egg-info/
+*.tmp
