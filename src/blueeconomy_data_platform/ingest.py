@@ -380,32 +380,73 @@ def read_identity_rows(
         ]
 
 
+# Row attributes excluded from immutable-replay identity comparison: they
+# record processing instants or optional labels, not event content.
+REPLAY_GUARD_EXCLUDED_COLUMNS = frozenset(
+    {"ingested_at", "promoted_at", "record_classification", "executed_at"}
+)
+
+
+def replay_guard_columns(rows: list[dict[str, Any]]) -> list[str]:
+    """Derive the immutable identity columns shared by every row in a batch."""
+    if not rows:
+        raise ValueError("cannot derive replay-guard columns from an empty batch")
+    columns = [column for column in rows[0] if column not in REPLAY_GUARD_EXCLUDED_COLUMNS]
+    for row in rows[1:]:
+        derived = [c for c in row if c not in REPLAY_GUARD_EXCLUDED_COLUMNS]
+        if derived != columns:
+            raise ValueError("batch rows do not share an identical column shape")
+    return columns
+
+
 def reject_conflicting_event_replays(table: DeltaTable, events: list[dict[str, Any]]) -> None:
-    event_ids = [str(event["event_id"]) for event in events]
-    existing_rows = read_identity_rows(table, list(EVENT_IDENTITY_COLUMNS), "event_id", event_ids)
-    existing_by_id = {str(row["event_id"]): row for row in existing_rows}
+    reject_conflicting_replays(table, events, "event_id")
+
+
+def reject_conflicting_replays(
+    table: DeltaTable, rows: list[dict[str, Any]], key_column: str
+) -> None:
+    columns = replay_guard_columns(rows)
+    keys = [str(row[key_column]) for row in rows]
+    existing_rows = read_identity_rows(table, columns, key_column, keys)
+    existing_by_key = {str(row[key_column]): row for row in existing_rows}
     conflicts: list[str] = []
-    for event in events:
-        event_id = str(event["event_id"])
-        existing = existing_by_id.get(event_id)
+    for row in rows:
+        key = str(row[key_column])
+        existing = existing_by_key.get(key)
         if existing is None:
             continue
-        if any(existing[column] != event[column] for column in EVENT_IDENTITY_COLUMNS):
-            conflicts.append(event_id)
+        if any(existing[column] != row[column] for column in columns):
+            conflicts.append(key)
     if conflicts:
         raise ValueError(
-            "event_id reuse conflicts with retained immutable content: "
+            f"{key_column} reuse conflicts with retained immutable content: "
             + ", ".join(sorted(conflicts))
         )
 
 
-def append_events(
+def append_rows(
     table_uri: str,
-    events: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    key_column: str = "event_id",
     table_description: str | None = None,
+    arrow_schema: pa.Schema | None = None,
+    table_name: str = "blueeconomy_event_envelope",
 ) -> tuple[int, int, int]:
+    """Insert-only merge of *rows* into an append-only Delta table.
+
+    Idempotent on *key_column*: a replayed row with identical immutable
+    content is counted as already present; a key reused with conflicting
+    content fails closed. ``arrow_schema`` fixes the physical schema for
+    tables with typed columns (for example vessel observations).
+    """
+    if not rows:
+        raise ValueError("refusing to append an empty row batch")
     validate_table_uri(table_uri)
-    arrow_table = pa.Table.from_pylist(events)
+    if arrow_schema is not None:
+        arrow_table = pa.Table.from_pylist(rows, schema=arrow_schema)
+    else:
+        arrow_table = pa.Table.from_pylist(rows)
     if not delta_table_exists(table_uri):
         description = EVENT_TABLE_DESCRIPTION
         if table_description is not None:
@@ -416,22 +457,22 @@ def append_events(
             table_uri,
             arrow_table,
             mode="error",
-            name="blueeconomy_event_envelope",
+            name=table_name,
             description=description,
             configuration={"delta.appendOnly": "true"},
         )
-        return DeltaTable(table_uri).version(), len(events), 0
+        return DeltaTable(table_uri).version(), len(rows), 0
 
     for attempt in range(1, MAX_COMMIT_ATTEMPTS + 1):
         table = DeltaTable(table_uri)
         if table.metadata().configuration.get("delta.appendOnly") != "true":
             raise ValueError("existing Delta table is not configured with delta.appendOnly=true")
-        reject_conflicting_event_replays(table, events)
+        reject_conflicting_replays(table, rows, key_column)
         try:
             metrics = (
                 table.merge(
                     source=arrow_table,
-                    predicate="target.event_id = source.event_id",
+                    predicate=f"target.{key_column} = source.{key_column}",
                     source_alias="source",
                     target_alias="target",
                 )
@@ -440,16 +481,24 @@ def append_events(
             )
             records_written = int(metrics["num_target_rows_inserted"])
             retained = DeltaTable(table_uri)
-            reject_conflicting_event_replays(retained, events)
+            reject_conflicting_replays(retained, rows, key_column)
             return (
                 retained.version(),
                 records_written,
-                len(events) - records_written,
+                len(rows) - records_written,
             )
         except CommitFailedError:
             if attempt == MAX_COMMIT_ATTEMPTS:
                 raise
     raise RuntimeError("Delta commit retry loop exhausted unexpectedly")
+
+
+def append_events(
+    table_uri: str,
+    events: list[dict[str, Any]],
+    table_description: str | None = None,
+) -> tuple[int, int, int]:
+    return append_rows(table_uri, events, table_description=table_description)
 
 
 def write_report(path: Path, report: IngestionReport) -> None:

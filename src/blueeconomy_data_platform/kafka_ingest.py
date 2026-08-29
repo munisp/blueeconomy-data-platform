@@ -10,14 +10,21 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from confluent_kafka import Consumer, KafkaError, KafkaException, Message
+from confluent_kafka import Consumer, KafkaError, KafkaException, Message, Producer
 from jsonschema import Draft202012Validator
 
+from blueeconomy_data_platform.dlq import (
+    REASON_DUPLICATE_EVENT_ID,
+    DeadLetterQueue,
+    DeadLetterSink,
+    reason_for_error,
+)
 from blueeconomy_data_platform.ingest import (
     MAX_LINE_BYTES,
     append_events,
@@ -55,6 +62,9 @@ class KafkaIngestionReport:
     messages_received: int
     records_written: int
     records_already_present: int
+    dlq_topic: str
+    messages_quarantined: int
+    dlq_reason_counts: dict[str, int]
     table_reference_sha256: str
     table_version: int
     committed_offsets: dict[str, int]
@@ -86,6 +96,16 @@ def parse_arguments() -> argparse.Namespace:
         help="Segregated lakehouse scope this consumer is authorized to write.",
     )
     parser.add_argument("--table-uri", required=True)
+    parser.add_argument(
+        "--dlq-topic",
+        required=True,
+        help="Dead-letter topic for poison messages; mandatory (no DLQ, no consumption).",
+    )
+    parser.add_argument(
+        "--dlq-table-uri",
+        required=True,
+        help="Append-only Delta quarantine table for dead-lettered messages.",
+    )
     parser.add_argument("--schema", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     return parser.parse_args()
@@ -191,14 +211,24 @@ def decode_event(
 
 def collect_messages(
     consumer: Consumer,
-    validator: Draft202012Validator,
-    verifier: EnvelopeSignatureVerifier,
+    decode: Callable[[bytes | None], dict[str, Any]],
     maximum: int,
     idle_timeout_seconds: float,
-) -> tuple[list[dict[str, Any]], list[Message]]:
+    dlq: DeadLetterSink,
+) -> tuple[list[dict[str, Any]], list[Message], dict[str, int]]:
+    """Collect a bounded batch, quarantining poison messages to the DLQ.
+
+    A malformed, schema-invalid, unverifiable or batch-duplicated message is
+    quarantined through *dlq* (fail-closed: a quarantine failure raises and
+    halts the run before any offset commit) and the pipeline continues with
+    the next message; its offset joins the commit set only after the DLQ
+    copy and quarantine-table row are durably written. Broker-level errors
+    still halt the run — they are not message poison.
+    """
     events: list[dict[str, Any]] = []
     messages: list[Message] = []
     event_ids: set[str] = set()
+    reason_counts: dict[str, int] = {}
     deadline = time.monotonic() + idle_timeout_seconds
     while len(messages) < maximum:
         remaining = deadline - time.monotonic()
@@ -212,17 +242,36 @@ def collect_messages(
             if message_error.code() == KafkaError._PARTITION_EOF:
                 continue
             raise KafkaException(message_error)
-        event = decode_event(message.value(), validator, verifier)
-        event_id = event["event_id"]
-        if event_id in event_ids:
-            raise ValueError(f"Kafka batch repeats event_id {event_id!r}")
+        try:
+            event = decode(message.value())
+            event_id = event["event_id"]
+            if event_id in event_ids:
+                raise ValueError(f"Kafka batch repeats event_id {event_id!r}")
+        except ValueError as error:
+            reason = (
+                REASON_DUPLICATE_EVENT_ID
+                if "repeats event_id" in str(error)
+                else reason_for_error(error)
+            )
+            topic = message.topic()
+            partition = message.partition()
+            offset = message.offset()
+            if topic is None or partition is None or offset is None:
+                raise ValueError(
+                    "poison Kafka message did not contain topic, partition and offset"
+                ) from error
+            dlq.quarantine(message.value(), topic, partition, offset, reason, str(error))
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            messages.append(message)
+            deadline = time.monotonic() + idle_timeout_seconds
+            continue
         event_ids.add(event_id)
         events.append(event)
         messages.append(message)
         deadline = time.monotonic() + idle_timeout_seconds
     if not messages:
         raise ValueError("no Kafka messages were received before the idle timeout")
-    return events, messages
+    return events, messages, reason_counts
 
 
 def enforce_record_classification(events: list[dict[str, Any]], scope: LakehouseScope) -> None:
@@ -241,6 +290,18 @@ def enforce_record_classification(events: list[dict[str, Any]], scope: Lakehouse
                 f"isr scope record {event.get('event_id')!r} is missing its "
                 "record_classification label; unlabelled classified records are rejected"
             )
+
+
+def build_dlq_producer(consumer_configuration: dict[str, Any]) -> Producer:
+    """Derive the DLQ producer from the validated consumer transport configuration."""
+    configuration = {
+        key: value
+        for key, value in consumer_configuration.items()
+        if not key.startswith(("group.", "enable.auto", "auto.offset", "allow.auto", "client."))
+    }
+    configuration["client.id"] = "blueeconomy-data-platform-dlq"
+    configuration["acks"] = "all"
+    return Producer(configuration)
 
 
 def commit_messages(consumer: Consumer, messages: list[Message]) -> dict[str, int]:
@@ -297,28 +358,46 @@ def main() -> None:
         scope = LakehouseScope(arguments.lakehouse_scope)
         enforce_topic_scope(arguments.topic, scope)
         require_scope_table_uri(scope, arguments.table_uri)
+        dlq_topic = require_canonical_text(arguments.dlq_topic, "dlq_topic", 249)
+        if not TOPIC_PATTERN.fullmatch(dlq_topic):
+            raise ValueError("dlq_topic is not a valid Kafka topic name")
+        if dlq_topic == arguments.topic:
+            raise ValueError("dlq_topic must differ from the consumed topic")
+        enforce_topic_scope(dlq_topic, scope)
+        require_scope_table_uri(scope, arguments.dlq_table_uri)
         configuration = validate_transport(arguments)
         validator = load_schema(arguments.schema)
         # Fail-closed: the consumer refuses to start without a readable
         # producer public-key directory (KEY_DIRECTORY_PATH).
         verifier = EnvelopeSignatureVerifier(load_key_directory_from_env())
+        dlq: DeadLetterSink = DeadLetterQueue(
+            producer=build_dlq_producer(configuration),
+            dlq_topic=dlq_topic,
+            quarantine_table_uri=arguments.dlq_table_uri,
+            consumer_group=arguments.group_id,
+        )
         consumer = Consumer(configuration)
         consumer.subscribe([arguments.topic])
-        events, messages = collect_messages(
+        events, messages, dlq_reason_counts = collect_messages(
             consumer,
-            validator,
-            verifier,
+            lambda value: decode_event(value, validator, verifier),
             arguments.max_messages,
             arguments.idle_timeout_seconds,
+            dlq,
         )
         enforce_event_scope(events, scope)
         enforce_record_classification(events, scope)
-        table_version, records_written, records_already_present = append_events(
-            arguments.table_uri, events
-        )
+        if events:
+            table_version, records_written, records_already_present = append_events(
+                arguments.table_uri, events
+            )
+        else:
+            # An all-poison batch still commits offsets after quarantine; the
+            # bronze table is untouched and the report reflects zero writes.
+            table_version, records_written, records_already_present = (-1, 0, 0)
         committed_offsets = commit_messages(consumer, messages)
         report = KafkaIngestionReport(
-            schema_version="blueeconomy.lakehouse.kafka-ingestion-report.v1",
+            schema_version="blueeconomy.lakehouse.kafka-ingestion-report.v2",
             started_at=started_at.isoformat(),
             completed_at=datetime.now(UTC).isoformat(),
             bootstrap_reference_sha256=reference_sha256(arguments.bootstrap_servers),
@@ -328,10 +407,13 @@ def main() -> None:
             messages_received=len(messages),
             records_written=records_written,
             records_already_present=records_already_present,
+            dlq_topic=dlq_topic,
+            messages_quarantined=sum(dlq_reason_counts.values()),
+            dlq_reason_counts=dict(sorted(dlq_reason_counts.items())),
             table_reference_sha256=reference_sha256(arguments.table_uri),
             table_version=table_version,
             committed_offsets=committed_offsets,
-            source_systems=sorted({event["source_system"] for event in events}),
+            source_systems=sorted({str(event["source_system"]) for event in events}),
             data_classifications=sorted({event["data_classification"] for event in events}),
         )
         write_kafka_report(arguments.report, report)
