@@ -28,7 +28,7 @@ FISHERIES_CLASSIFICATION = "fisheries_operational"
 ISR_CLASSIFICATION = "isr_classified"
 
 CVFF_TOPIC_PREFIX = "cvff."
-PLATFORM_TOPIC_PREFIXES = ("ports.", "ferries.")
+PLATFORM_TOPIC_PREFIXES = ("ports.", "ferries.", "vessels.")
 SEAFARER_TOPIC_PREFIXES = ("seafarer.",)
 FISHERIES_TOPIC_PREFIXES = ("fisheries.", "coldchain.", "export.")
 ISR_TOPIC_PREFIXES = ("maritime.isr.", "maritime.behaviour.", "maritime.outcome.")
