@@ -25,6 +25,16 @@ Engines (``--engine``):
 Both engines atomically rebuild ``silver.vessel_trajectories`` from
 ``bronze.vessel_observations``; the silver table is derived state, so
 replays are idempotent.
+
+Telemetry (Phase-7 OTel, OTEL_DESIGN.md §3 Sedona row): Sedona runs
+on-Spark here, so coverage is split. The Python driver emits
+``lakehouse.pipeline.vessel_trajectory_silver`` DAG spans around the
+bronze-read / Sedona-SQL / silver-write phases (no-op unless
+``OTEL_EXPORTER_OTLP_ENDPOINT`` is set). Executor/JVM coverage is a
+deployment concern of the ``sedona-spark-jobs`` gitops chart: the OTel
+Java agent on the Spark driver/executors plus the Spark Prometheus (JMX)
+sink — that config does not live in this repository and is not fabricated
+here.
 """
 
 from __future__ import annotations
@@ -104,11 +114,16 @@ def run_spark_engine(arguments: argparse.Namespace) -> None:
         )
         .getOrCreate()
     )
+    from blueeconomy_data_platform.telemetry import get_tracer
+
     sedona = SedonaContext.create(spark)
     sedona.conf.set("sedona.global.charset", "utf8")
 
-    bronze = sedona.read.format("delta").load(arguments.bronze_uri)
-    bronze.createOrReplaceTempView("bronze_vessel_observations")
+    tracer = get_tracer()
+    with tracer.start_as_current_span("lakehouse.sedona.read_bronze") as span:
+        span.set_attribute("lakehouse.table", "bronze.vessel_observations")
+        bronze = sedona.read.format("delta").load(arguments.bronze_uri)
+        bronze.createOrReplaceTempView("bronze_vessel_observations")
 
     gap_seconds = arguments.gap_hours * 3600.0
     partition = Window.partitionBy("mmsi").orderBy("occurred_at", "event_id")
@@ -133,8 +148,10 @@ def run_spark_engine(arguments: argparse.Namespace) -> None:
     # the sorted array is the governed ST_MakeLine path, and
     # ST_SimplifyPreserveTopology applies the topology-preserving
     # simplification, both in EPSG:4326.
-    trajectories = sedona.sql(
-        f"""
+    with tracer.start_as_current_span("lakehouse.sedona.sql_transform") as span:
+        span.set_attribute("lakehouse.table", "silver.vessel_trajectories")
+        trajectories = sedona.sql(
+            f"""
         WITH ordered AS (
           SELECT
             mmsi,
@@ -180,15 +197,18 @@ def run_spark_engine(arguments: argparse.Namespace) -> None:
           'EPSG:4326' AS crs
         FROM ordered
         """
-    )
+        )
 
-    (
-        trajectories.write.format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .save(arguments.silver_uri)
-    )
-    count = sedona.read.format("delta").load(arguments.silver_uri).count()
+    with tracer.start_as_current_span("lakehouse.sedona.write_silver") as span:
+        span.set_attribute("lakehouse.table", "silver.vessel_trajectories")
+        (
+            trajectories.write.format("delta")
+            .mode("overwrite")
+            .option("overwriteSchema", "true")
+            .save(arguments.silver_uri)
+        )
+        count = sedona.read.format("delta").load(arguments.silver_uri).count()
+        span.set_attribute("lakehouse.rows", count)
     print(f"silver.vessel_trajectories rebuilt via Sedona: rows={count}")
     spark.stop()
 
@@ -211,10 +231,28 @@ def main() -> None:
     engine = arguments.engine
     if engine == "spark" and not sedona_available():
         raise SystemExit(SPARK_UNAVAILABLE_MESSAGE)
-    if engine == "spark" or (engine == "auto" and sedona_available()):
-        run_spark_engine(arguments)
-    else:
-        run_python_engine(arguments)
+    # Phase-7 OTel: DAG-level driver span for this batch run; no-op unless
+    # OTEL_EXPORTER_OTLP_ENDPOINT is set (sanctioned fail-open).
+    from blueeconomy_data_platform.telemetry import (
+        get_tracer,
+        init_telemetry,
+        shutdown_telemetry,
+    )
+
+    init_telemetry(
+        service_name="blueeconomy-data-platform-vessel-trajectory-silver", version="0.1.0"
+    )
+    try:
+        with get_tracer().start_as_current_span(
+            "lakehouse.pipeline.vessel_trajectory_silver",
+            attributes={"lakehouse.engine": engine},
+        ):
+            if engine == "spark" or (engine == "auto" and sedona_available()):
+                run_spark_engine(arguments)
+            else:
+                run_python_engine(arguments)
+    finally:
+        shutdown_telemetry()
 
 
 if __name__ == "__main__":

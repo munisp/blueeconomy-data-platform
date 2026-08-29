@@ -225,6 +225,25 @@ def collect_messages(
     copy and quarantine-table row are durably written. Broker-level errors
     still halt the run — they are not message poison.
     """
+    # Phase-7 OTel span (no-op when telemetry is disabled).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.ingest.collect") as span:
+        events, messages, reason_counts = _collect_messages(
+            consumer, decode, maximum, idle_timeout_seconds, dlq
+        )
+        span.set_attribute("lakehouse.messages_received", len(messages))
+        span.set_attribute("lakehouse.messages_quarantined", sum(reason_counts.values()))
+        return events, messages, reason_counts
+
+
+def _collect_messages(
+    consumer: Consumer,
+    decode: Callable[[bytes | None], dict[str, Any]],
+    maximum: int,
+    idle_timeout_seconds: float,
+    dlq: DeadLetterSink,
+) -> tuple[list[dict[str, Any]], list[Message], dict[str, int]]:
     events: list[dict[str, Any]] = []
     messages: list[Message] = []
     event_ids: set[str] = set()
@@ -305,6 +324,16 @@ def build_dlq_producer(consumer_configuration: dict[str, Any]) -> Producer:
 
 
 def commit_messages(consumer: Consumer, messages: list[Message]) -> dict[str, int]:
+    # Phase-7 OTel span (no-op when telemetry is disabled).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.ingest.commit_offsets") as span:
+        offsets = _commit_messages(consumer, messages)
+        span.set_attribute("lakehouse.partitions_committed", len(offsets))
+        return offsets
+
+
+def _commit_messages(consumer: Consumer, messages: list[Message]) -> dict[str, int]:
     offsets: dict[str, int] = {}
     latest_by_partition: dict[tuple[str, int], Message] = {}
     for message in messages:
@@ -350,6 +379,20 @@ def write_kafka_report(path: Path, report: KafkaIngestionReport) -> None:
 
 
 def main() -> None:
+    # OTel (Phase-7): no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set — the
+    # sanctioned fail-open; ingestion never depends on telemetry.
+    from blueeconomy_data_platform.telemetry import init_telemetry, shutdown_telemetry
+
+    init_telemetry(service_name="blueeconomy-data-platform-kafka-ingest", version="0.1.0")
+    try:
+        _run()
+    finally:
+        shutdown_telemetry()
+
+
+def _run() -> None:
+    from blueeconomy_data_platform import telemetry
+
     arguments = parse_arguments()
     started_at = datetime.now(UTC)
     consumer: Consumer | None = None
@@ -385,17 +428,35 @@ def main() -> None:
             arguments.idle_timeout_seconds,
             dlq,
         )
-        enforce_event_scope(events, scope)
-        enforce_record_classification(events, scope)
-        if events:
-            table_version, records_written, records_already_present = append_events(
-                arguments.table_uri, events
-            )
-        else:
-            # An all-poison batch still commits offsets after quarantine; the
-            # bronze table is untouched and the report reflects zero writes.
-            table_version, records_written, records_already_present = (-1, 0, 0)
-        committed_offsets = commit_messages(consumer, messages)
+        # DAG-level trace for this pipeline run (ingest -> bronze): joins the
+        # first upstream traceparent found on the consumed records, links the
+        # remaining ones, and lifts tenant.id/agency baggage onto the span.
+        parent_context, message_links = telemetry.extract_message_links(messages)
+        span_attributes = {
+            "messaging.kafka.topic": arguments.topic,
+            "lakehouse.scope": scope.value,
+            **telemetry.baggage_span_attributes(parent_context),
+        }
+        tracer = telemetry.get_tracer()
+        with tracer.start_as_current_span(
+            "lakehouse.pipeline.kafka_ingest",
+            context=parent_context,
+            links=message_links,
+            attributes=span_attributes,
+        ) as pipeline_span:
+            enforce_event_scope(events, scope)
+            enforce_record_classification(events, scope)
+            if events:
+                table_version, records_written, records_already_present = append_events(
+                    arguments.table_uri, events
+                )
+            else:
+                # An all-poison batch still commits offsets after quarantine; the
+                # bronze table is untouched and the report reflects zero writes.
+                table_version, records_written, records_already_present = (-1, 0, 0)
+            committed_offsets = commit_messages(consumer, messages)
+            pipeline_span.set_attribute("lakehouse.messages_received", len(messages))
+            pipeline_span.set_attribute("lakehouse.records_written", records_written)
         report = KafkaIngestionReport(
             schema_version="blueeconomy.lakehouse.kafka-ingestion-report.v2",
             started_at=started_at.isoformat(),

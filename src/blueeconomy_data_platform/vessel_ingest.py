@@ -108,6 +108,20 @@ def reference_sha256(value: str) -> str:
 
 
 def main() -> None:
+    # OTel (Phase-7): no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set — the
+    # sanctioned fail-open; ingestion never depends on telemetry.
+    from blueeconomy_data_platform.telemetry import init_telemetry, shutdown_telemetry
+
+    init_telemetry(service_name="blueeconomy-data-platform-vessel-ingest", version="0.1.0")
+    try:
+        _run()
+    finally:
+        shutdown_telemetry()
+
+
+def _run() -> None:
+    from blueeconomy_data_platform import telemetry
+
     arguments = parse_arguments()
     started_at = datetime.now(UTC)
     consumer: Consumer | None = None
@@ -143,13 +157,29 @@ def main() -> None:
             arguments.idle_timeout_seconds,
             dlq,
         )
-        if rows:
-            table_version, records_written, records_already_present = append_vessel_observations(
-                arguments.table_uri, rows
-            )
-        else:
-            table_version, records_written, records_already_present = (-1, 0, 0)
-        committed_offsets = commit_messages(consumer, messages)
+        # DAG-level trace for this pipeline run (ingest -> bronze), joining
+        # upstream traceparents carried on the consumed vessel records.
+        parent_context, message_links = telemetry.extract_message_links(messages)
+        span_attributes = {
+            "messaging.kafka.topic": arguments.topic,
+            "lakehouse.scope": scope.value,
+            **telemetry.baggage_span_attributes(parent_context),
+        }
+        with telemetry.get_tracer().start_as_current_span(
+            "lakehouse.pipeline.vessel_ingest",
+            context=parent_context,
+            links=message_links,
+            attributes=span_attributes,
+        ) as pipeline_span:
+            if rows:
+                table_version, records_written, records_already_present = (
+                    append_vessel_observations(arguments.table_uri, rows)
+                )
+            else:
+                table_version, records_written, records_already_present = (-1, 0, 0)
+            committed_offsets = commit_messages(consumer, messages)
+            pipeline_span.set_attribute("lakehouse.messages_received", len(messages))
+            pipeline_span.set_attribute("lakehouse.records_written", records_written)
         report = KafkaIngestionReport(
             schema_version="blueeconomy.lakehouse.vessel-ingestion-report.v1",
             started_at=started_at.isoformat(),

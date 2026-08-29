@@ -498,7 +498,21 @@ def append_events(
     events: list[dict[str, Any]],
     table_description: str | None = None,
 ) -> tuple[int, int, int]:
-    return append_rows(table_uri, events, table_description=table_description)
+    # Phase-7 OTel span (no-op when telemetry is disabled). This is also the
+    # S3/MinIO client span: Delta writes go through deltalake/object_store,
+    # which is the only storage client (no boto3/httpx S3 client exists).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.bronze.append") as span:
+        span.set_attribute("lakehouse.rows", len(events))
+        span.set_attribute("storage.uri_scheme", table_uri.split(":", 1)[0])
+        version, written, already_present = append_rows(
+            table_uri, events, table_description=table_description
+        )
+        span.set_attribute("lakehouse.records_written", written)
+        span.set_attribute("lakehouse.records_already_present", already_present)
+        span.set_attribute("lakehouse.table_version", version)
+        return version, written, already_present
 
 
 def write_report(path: Path, report: IngestionReport) -> None:

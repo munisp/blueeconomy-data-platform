@@ -16,6 +16,10 @@ dependencies = [
   "jsonschema==4.26.0",
   "pyais==3.2.1",
   "pyarrow==25.0.1",
+  # Phase-7 OTel wave: OTLP gRPC exporters. Disabled (no-op) unless
+  # OTEL_EXPORTER_OTLP_ENDPOINT is set.
+  "opentelemetry-sdk==1.44.0",
+  "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
 ]
 
 [project.optional-dependencies]

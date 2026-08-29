@@ -250,6 +250,24 @@ def append_silver(
         raise BoundaryViolationError("silver promotion is only defined for the cvff boundary")
     if not records:
         raise ValueError("refusing to promote an empty silver batch")
+    # Phase-7 OTel span (no-op when telemetry is disabled); silver-stage of
+    # the medallion DAG and the object_store (S3/MinIO) client span.
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.silver.append") as span:
+        span.set_attribute("lakehouse.scope", writer.scope.value)
+        span.set_attribute("lakehouse.rows", len(records))
+        version, written, already_present = _append_silver(writer, records)
+        span.set_attribute("lakehouse.records_written", written)
+        span.set_attribute("lakehouse.records_already_present", already_present)
+        span.set_attribute("lakehouse.table_version", version)
+        return version, written, already_present
+
+
+def _append_silver(
+    writer: SegregatedDeltaWriter,
+    records: list[dict[str, Any]],
+) -> tuple[int, int, int]:
     keys = [str(record["dedup_key"]) for record in records]
     if len(set(keys)) != len(keys):
         raise ValueError("silver batch repeats a dedup_key")
@@ -300,6 +318,19 @@ def curate_gold(writer: SegregatedDeltaWriter) -> tuple[int, int]:
     """
     if writer.scope is not LakehouseScope.CVFF:
         raise BoundaryViolationError("gold curation is only defined for the cvff boundary")
+    # Phase-7 OTel span (no-op when telemetry is disabled); gold-stage of
+    # the medallion DAG and the object_store (S3/MinIO) client span.
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.gold.curate") as span:
+        span.set_attribute("lakehouse.scope", writer.scope.value)
+        version, row_count = _curate_gold(writer)
+        span.set_attribute("lakehouse.rows", row_count)
+        span.set_attribute("lakehouse.table_version", version)
+        return version, row_count
+
+
+def _curate_gold(writer: SegregatedDeltaWriter) -> tuple[int, int]:
     silver_uri = writer.table_uri("silver")
     if not _table_exists(silver_uri):
         raise ValueError("cannot curate gold before the silver table exists")

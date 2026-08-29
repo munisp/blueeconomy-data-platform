@@ -128,6 +128,19 @@ def _write_json_atomic(path: Path, document: object) -> None:
 
 def run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
     """Execute one gold-assembly pass for the configured scope."""
+    # Phase-7 OTel span (no-op when telemetry is disabled); the gold stage
+    # of the medallion DAG (curate_gold nests the silver->gold write spans).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.pipeline.gold_assembly") as span:
+        span.set_attribute("lakehouse.scope", config.scope.value)
+        report = _run(config)
+        span.set_attribute("lakehouse.rows", report.gold_rows)
+        span.set_attribute("lakehouse.table_version", report.gold_table_version)
+        return report
+
+
+def _run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
     started_at = datetime.now(UTC)
     writer = SegregatedDeltaWriter(config.scope, config.scope_root_uri)
     exported_rows: int | None = None
@@ -156,6 +169,10 @@ def run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
 
 
 def main() -> None:
+    # OTel (Phase-7): no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    from blueeconomy_data_platform.telemetry import init_telemetry, shutdown_telemetry
+
+    init_telemetry(service_name="blueeconomy-data-platform-gold-assembly", version="0.1.0")
     try:
         config = load_config(os.environ)
         report = run(config)
@@ -164,6 +181,8 @@ def main() -> None:
     except (AccessDeniedError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"blueeconomy-gold-assembly: {error}", file=sys.stderr)
         raise SystemExit(1) from error
+    finally:
+        shutdown_telemetry()
 
 
 if __name__ == "__main__":

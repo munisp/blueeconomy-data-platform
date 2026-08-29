@@ -140,12 +140,25 @@ class DeadLetterQueue:
             if error is not None:
                 delivery_errors.append(str(error))
 
-        self.producer.produce(
-            self.dlq_topic,
-            value=json.dumps(record, separators=(",", ":")).encode("utf-8"),
-            key=record["dlq_event_id"].encode("ascii"),
-            on_delivery=_delivery,
-        )
+        # Phase-7 OTel: carry the current W3C tracecontext into the DLQ
+        # record headers (additive; empty carrier when telemetry is off or
+        # no span is active) so quarantined messages stay trace-joined.
+        from blueeconomy_data_platform import telemetry
+
+        carrier = telemetry.inject_context({})
+        with telemetry.get_tracer().start_as_current_span("lakehouse.dlq.quarantine") as span:
+            span.set_attribute("messaging.kafka.topic", self.dlq_topic)
+            span.set_attribute("lakehouse.dlq.reason", reason)
+            produce_kwargs: dict[str, Any] = {}
+            if carrier:  # only attach headers when a trace context is active
+                produce_kwargs["headers"] = telemetry.carrier_to_kafka_headers(carrier)
+            self.producer.produce(
+                self.dlq_topic,
+                value=json.dumps(record, separators=(",", ":")).encode("utf-8"),
+                key=record["dlq_event_id"].encode("ascii"),
+                on_delivery=_delivery,
+                **produce_kwargs,
+            )
         remaining = self.producer.flush(30.0)
         if remaining or delivery_errors:
             raise DeadLetterError(

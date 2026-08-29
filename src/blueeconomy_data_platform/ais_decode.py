@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pyais import decode as _pyais_decode
 from pyais.exceptions import InvalidNMEAMessageException, UnknownMessageException
+
+from blueeconomy_data_platform.telemetry import get_meter as _get_meter
 
 MAX_NMEA_SENTENCES = 9
 MAX_NMEA_SENTENCE_BYTES = 1024
@@ -132,6 +135,26 @@ def _optional_degrees(value: object, unavailable: float, label: str) -> float | 
     return degrees
 
 
+# Phase-7 OTel pyais decode metrics (no-op counters/histogram when
+# OTEL_EXPORTER_OTLP_ENDPOINT is unset). Low-cardinality only: no MMSI, no
+# message payloads. Rows/s is derived collector-side as
+# rate(ais_decode_rows_total); parse errors are ais_decode_errors_total.
+_meter = _get_meter("blueeconomy_data_platform.ais")
+_ais_rows_total = _meter.create_counter(
+    "ais_decode_rows_total",
+    description="AIS position reports successfully decoded by pyais",
+)
+_ais_errors_total = _meter.create_counter(
+    "ais_decode_errors_total",
+    description="AIS decode failures (fail-closed ValueError), by stage",
+)
+_ais_decode_seconds = _meter.create_histogram(
+    "ais_decode_duration_seconds",
+    unit="s",
+    description="pyais decode latency per NMEA sentence group",
+)
+
+
 def decode_aivdm(sentences: Sequence[str]) -> AisPositionReport:
     """Decode raw AIVDM/AIVDO sentences into a validated position report.
 
@@ -140,6 +163,20 @@ def decode_aivdm(sentences: Sequence[str]) -> AisPositionReport:
     checksum-valid class A or class B position report with an available
     position fails closed.
     """
+    started = time.perf_counter()
+    try:
+        report = _decode_aivdm(sentences)
+    except ValueError as error:
+        stage = "nmea_decode" if "could not be decoded" in str(error) else "validation"
+        _ais_errors_total.add(1, {"error_stage": stage})
+        raise
+    finally:
+        _ais_decode_seconds.record(time.perf_counter() - started)
+    _ais_rows_total.add(1)
+    return report
+
+
+def _decode_aivdm(sentences: Sequence[str]) -> AisPositionReport:
     validated = validate_aivdm_sentences(sentences)
     try:
         message = _pyais_decode(*validated)
