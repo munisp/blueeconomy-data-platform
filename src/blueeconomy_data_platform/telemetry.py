@@ -52,9 +52,7 @@ SHUTDOWN_FLUSH_TIMEOUT_MILLIS = 5_000
 DROPPED_METRIC = "telemetry_dropped_total"
 MAX_MESSAGE_LINKS = 8
 
-_propagator = CompositePropagator(
-    [TraceContextTextMapPropagator(), W3CBaggagePropagator()]
-)
+_propagator = CompositePropagator([TraceContextTextMapPropagator(), W3CBaggagePropagator()])
 
 
 class _DictSetter(Setter[MutableMapping[str, str]]):
@@ -105,7 +103,9 @@ def carrier_to_kafka_headers(carrier: MutableMapping[str, str]) -> list[tuple[st
     return [(key, value.encode("utf-8")) for key, value in carrier.items()]
 
 
-def extract_message_links(messages: Iterable[Any]) -> tuple[context.Context | None, list[trace.Link]]:
+def extract_message_links(
+    messages: Iterable[Any],
+) -> tuple[context.Context | None, list[trace.Link]]:
     """Extract trace contexts from consumed Kafka messages.
 
     Returns the first message context found (parent for the DAG span) plus
@@ -204,9 +204,7 @@ def init_telemetry(*, service_name: str, version: str) -> bool:
         meter_provider = MeterProvider(
             resource=resource,
             metric_readers=[
-                PeriodicExportingMetricReader(
-                    OTLPMetricExporter(), export_interval_millis=30_000
-                )
+                PeriodicExportingMetricReader(OTLPMetricExporter(), export_interval_millis=30_000)
             ],
         )
         metrics.set_meter_provider(meter_provider)
