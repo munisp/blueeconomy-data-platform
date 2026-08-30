@@ -70,8 +70,10 @@ Workstream C (CVFF fintech) runs on a **physically segregated Delta Lake schema*
 | seafarer | `seafarer.*` | `seafarer_confidential` (CONFIDENTIAL credentials) | `<root>/seafarer/seafarer_bronze/events`, `seafarer_silver/events`, `seafarer_gold/events` |
 | fisheries | `fisheries.*`, `coldchain.*`, `export.*` | `fisheries_operational` | `<root>/fisheries/fisheries_bronze/events`, `fisheries_silver/events`, `fisheries_gold/events` |
 | isr | `maritime.isr.*`, `maritime.behaviour.*`, `maritime.outcome.*` | `isr_classified` (CLASSIFIED — highest bar) | `<root>/isr/isr_bronze/events`, `isr_silver/events`, `isr_gold/events` |
+| mrv | `mrv.*` | `mrv_confidential` (CONFIDENTIAL/INTERNAL evidence) | `<root>/mrv/mrv_bronze/events`, `mrv_silver/events`, `mrv_gold/events` + `mrv_gold/vessel_annual` |
+| bluecarbon | `bluecarbon.*` | `bluecarbon_internal` (INTERNAL/CONFIDENTIAL evidence) | `<root>/bluecarbon/bluecarbon_bronze/events`, `bluecarbon_silver/events`, `bluecarbon_gold/events` + `bluecarbon_gold/public_registry` (the scope's only public artefact) |
 
-The phase-2 scopes (Workstreams D, E, F) follow the same boundary model as cvff: each scope root must terminate in its own `<scope>*` path component and no other, every scope has its own medallion tables, and `SegregatedDeltaWriter`/`guard_write` enforce classification, topic and table-URI boundaries identically for every scope.
+The phase-2 scopes (Workstreams D, E, F) follow the same boundary model as cvff: each scope root must terminate in its own `<scope>*` path component and no other, every scope has its own medallion tables, and `SegregatedDeltaWriter`/`guard_write` enforce classification, topic and table-URI boundaries identically for every scope. The phase-8 scopes (mrv, bluecarbon) inherit the identical boundary rules; `scope_medallion` provides their generic bronze (append-only raw envelopes) and silver (deduplicated on `sha256(kafka_topic/kafka_partition/kafka_offset/eventId)`) layers, with scope-specific gold assemblers (`mrv_gold.vessel_annual` from VERIFIED annual reports only; `bluecarbon_gold.public_registry` as a fixed SELECT-list public projection that can never copy confidential evidence fields).
 
 ### Boundary guarantees
 
@@ -80,7 +82,7 @@ Segregation is enforced at the write path, not by routing convention:
 - `blueeconomy_data_platform.segregation.SegregatedDeltaWriter` is initialized for exactly one scope and one scope root. A cvff writer cannot be pointed at a non-`cvff*` root, and a platform writer cannot be pointed at a `cvff*` root — initialization fails closed.
 - `guard_write` raises `BoundaryViolationError` before any record is written when an event classification, Kafka topic or table URI belongs to the other scope. A platform writer cannot write a `fiduciary_segregated` record and a cvff writer cannot write any platform-classified record.
 - Classification and topic mappings fail closed: an unrecognized `data_classification` or a topic outside the `cvff.*`/`ports.*`/`ferries.*`/`vessels.*` namespaces is rejected, never defaulted.
-- `blueeconomy-ingest-kafka` requires `--lakehouse-scope platform|cvff|seafarer|fisheries|isr`; the topic namespace, the event classifications in the batch and the target table URI must all match the declared scope before consumption is persisted.
+- `blueeconomy-ingest-kafka` requires `--lakehouse-scope platform|cvff|seafarer|fisheries|isr|mrv|bluecarbon`; the topic namespace, the event classifications in the batch and the target table URI must all match the declared scope before consumption is persisted.
 - Classification-labelled ingestion: ISR-scope records must additionally carry a per-record `record_classification` clearance label (`UNCLASSIFIED`, `RESTRICTED`, `CONFIDENTIAL` or `SECRET`). An ISR record without the label is rejected before any write; the validated label is persisted as a `record_classification` column so readers apply row-level clearance filtering (`access_policy.clearance_permits` / `filter_records_by_clearance`).
 
 ### CVFF medallion layers
@@ -122,7 +124,9 @@ Unknown roles, unknown schemas and empty claim sets are denied. No governance ro
 
 | Variable | Requirement |
 |---|---|
-| `BLUEECONOMY_GOLD_SCOPE` | `cvff` runs the silver→gold ledger-commitment rollup; `fisheries` runs the export-consignment gold assembly plus the clearance-filtered export. Any other scope fails closed. |
+| `BLUEECONOMY_GOLD_SCOPE` | `cvff` runs the silver→gold ledger-commitment rollup; `fisheries` runs the export-consignment gold assembly plus the clearance-filtered export; `platform` runs the port-KPI statistics rollup (see below); `mrv` runs the MRV `vessel_annual` gold assembly; `bluecarbon` runs the `public_registry` projection. Any other scope fails closed. |
+| `BLUEECONOMY_GOLD_STATS_PERIOD` | Required for `platform`: the `YYYY-MM` computation period. |
+| `BLUEECONOMY_SIGNING_KEY_SEED` / `BLUEECONOMY_SIGNING_KID` | Required for `platform`: env-only Ed25519 report-signing key (64-hex or base64url seed) and kid; the run's JSON report artefact is signed under the envelope v1.0 JWS scheme. |
 | `BLUEECONOMY_GOLD_SCOPE_ROOT_URI` | The segregated scope root URI; `SegregatedDeltaWriter` enforces the scope boundary on it. |
 | `BLUEECONOMY_GOLD_REPORT` | Non-secret JSON run-report path (counts, table version, clearance; no payload data). |
 | `BLUEECONOMY_GOLD_EXPORT_PATH` | Required for `fisheries`: JSON export of the consignment rows visible at the configured clearance. |
@@ -138,6 +142,19 @@ blueeconomy-gold-assembly
 ```
 
 Scheduling: run one invocation per scope on a bounded cadence, after the ingestion window closes. A cron entry (for example `*/15 * * * *` per scope with a per-scope lock) is sufficient for batch cadences; on the platform's Temporal deployment, model each scope as a scheduled workflow with a single activity per invocation — the command is idempotent (gold tables are atomically rebuilt derived state), so a retried or overlapping run never duplicates or corrupts gold content. The run report is the operations evidence for each scheduled pass.
+
+### Statistics Port: reproducible port KPIs (phase 8)
+
+`blueeconomy_data_platform.port_statistics` is the platform-scope gold rollup for port KPIs (vessel calls, turnaround, waiting time, berth occupancy, throughput, truck gate turnaround, booking lead time / slot utilisation, declaration clearance; UNCTAD lineage, definitions pinned in the `KPI_DEFINITIONS` registry). Core invariant: **no fabricated figures** — every value is computed by a batch run over the platform silver events table at a pinned Delta table version:
+
+- `platform_gold/port_kpi_runs` — provenance manifest, one append-only row per run: deterministic `run_id` (uuid5 over period + pinned source table versions + `query_definitions_sha256`), `computed_at`, `source_table_versions_json`, `report_sha256`.
+- `platform_gold/port_kpi_values` — one row per KPI × period × port × segment. **No-data rows are first class**: a KPI with zero observations is emitted with `value=null` and a coverage note (`no source events in period`), never omitted and never filled with estimates, samples or seed values. KPIs whose upstream feed does not yet exist ship as gap rows citing `STATS_GAPS` (`GAP-STATS-BERTH-REF`, `GAP-STATS-TEU`, `GAP-STATS-SW-EVENTS`).
+- `platform_gold/port_call_facts` — the silver-derived per-call fact table feeding the KPIs (vessel identity hashed).
+- `platform_gold/port_kpi_reports/<run_id>.{json,csv}` — the signed per-run report artefact (envelope v1.0 JWS-EdDSA scheme; `report_sha256` over the JCS-canonical report core, which excludes wall-clock fields so identical inputs reproduce identical hashes).
+
+Determinism/replay: the same platform silver table version + period + pinned definitions always reproduces the same `run_id` and `report_sha256`, and replay merges idempotently (covered by a dedicated test).
+
+`blueeconomy-stats-api` (`stats_api.py`) is the read-only serving layer: `GET /v1/stats/health` (liveness), `/v1/stats/kpis` (registry), `/v1/stats/runs` (provenance ledger), `/v1/stats/values?kpi_id=&port_code=&period=` (exact precomputed gold rows, always with `run_id` + `source_table_versions`; it never computes aggregates at request time) and `/v1/stats/report/{run_id}?format=json|csv` (the exact signed artefact). Env-only, fail-closed configuration: `STATS_API_TABLE_ROOT`, `STATS_API_PORT`, `STATS_API_BEARER_TOKEN_SECRET` (HS256 gateway-token pattern; data routes require the `stats-reader` role claim). Missing or malformed inputs fail closed with 401/403/400; missing gold tables return a truthful 503, never an empty success.
 
 ### Cloud-agnostic storage configuration
 
