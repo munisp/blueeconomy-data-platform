@@ -790,23 +790,9 @@ PORT_CALL_FACTS_SCHEMA = pa.schema(
     ]
 )
 
-PORT_KPI_RUNS_SCHEMA = pa.schema(
-    [
-        pa.field("run_id", pa.string(), nullable=False),
-        pa.field("period", pa.string(), nullable=False),
-        pa.field("source_table", pa.string(), nullable=False),
-        pa.field("table_version", pa.int64(), nullable=False),
-        pa.field("query_hash", pa.string(), nullable=False),
-        pa.field("definitions_version", pa.string(), nullable=False),
-        pa.field("started_at", pa.timestamp("us", tz="UTC"), nullable=False),
-        pa.field("finished_at", pa.timestamp("us", tz="UTC"), nullable=False),
-        pa.field("input_event_count", pa.int64(), nullable=False),
-        pa.field("report_path", pa.string(), nullable=False),
-    ]
-)
-
 PORT_KPI_VALUES_SCHEMA = pa.schema(
     [
+        pa.field("value_key", pa.string(), nullable=False),
         pa.field("run_id", pa.string(), nullable=False),
         pa.field("kpi_id", pa.string(), nullable=False),
         pa.field("period", pa.string(), nullable=False),
@@ -825,241 +811,393 @@ PORT_KPI_VALUES_SCHEMA = pa.schema(
     ]
 )
 
+PORT_KPI_RUNS_SCHEMA = pa.schema(
+    [
+        pa.field("run_id", pa.string(), nullable=False),
+        pa.field("computed_at", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("period", pa.string(), nullable=False),
+        pa.field("period_start", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("period_end", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("scope", pa.string(), nullable=False),
+        pa.field("source_table_versions_json", pa.string(), nullable=False),
+        pa.field("query_definitions_sha256", pa.string(), nullable=False),
+        pa.field("kpi_count", pa.int64(), nullable=False),
+        pa.field("rows_emitted", pa.int64(), nullable=False),
+        pa.field("rows_no_data", pa.int64(), nullable=False),
+        pa.field("report_sha256", pa.string(), nullable=False),
+    ]
+)
 
-def run_id_for(period: str, source_table: str, table_version: int, query_hash: str) -> str:
-    """Deterministic run id: identical inputs reproduce the identical run."""
-    material = f"{period}|{source_table}|{table_version}|{query_hash}"
+
+def value_row_key(row: dict[str, Any]) -> str:
+    """Stable identity key for one KPI value row (idempotent replay merges)."""
+    material = "/".join(
+        [
+            str(row["run_id"]),
+            str(row["kpi_id"]),
+            str(row["period"]),
+            str(row["port_code"]),
+            str(row["ship_class"]),
+            str(row["percentile"]),
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def build_run_id(
+    scope_root_uri: str, period: str, source_table_versions: dict[str, int], query_hash: str
+) -> str:
+    """Deterministic run id: identical inputs always reproduce the same run."""
+    material = canonical_json(
+        {
+            "period": period,
+            "query_definitions_sha256": query_hash,
+            "scope_root": scope_root_uri.rstrip("/"),
+            "source_table_versions": source_table_versions,
+        }
+    )
     return str(uuid.uuid5(RUN_ID_NAMESPACE, material))
 
 
-def read_silver_events_at_version(table_uri: str, table_version: int) -> list[dict[str, Any]]:
-    """Read the silver events table pinned at ``table_version`` (time travel)."""
-    table = DeltaTable(table_uri, version=table_version)
-    return table.to_pyarrow_table().to_pylist()
-
-
-def render_report_markdown(
-    *,
-    period: str,
+def build_report_core(
     run_id: str,
-    source_table: str,
-    table_version: int,
+    period: str,
+    period_start: datetime,
+    period_end: datetime,
+    source_table_versions: dict[str, int],
     query_hash: str,
-    input_event_count: int,
     value_rows: list[dict[str, Any]],
-    generated_at: datetime,
-) -> str:
-    """Render the human-readable KPI report; no-data and gap rows are shown."""
-    lines = [
-        f"# Port KPI report — {period}",
-        "",
-        f"- run_id: `{run_id}`",
-        f"- source table: `{source_table}` at Delta version `{table_version}`",
-        f"- query definitions sha256: `{query_hash}`",
-        f"- input silver events: `{input_event_count}`",
-        f"- generated at (UTC): `{generated_at.isoformat().replace('+00:00', 'Z')}`",
-        "",
-        "| KPI | Port | Ship class | Percentile | Value | Unit | n | Note |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+) -> dict[str, Any]:
+    """The deterministic report body: every field derives from pinned inputs.
+
+    ``computed_at`` and the signature live outside the core so two runs over
+    identical inputs produce an identical ``report_sha256``.
+    """
+    values = [
+        {
+            key: row[key]
+            for key in (
+                "kpi_id",
+                "period",
+                "port_code",
+                "ship_class",
+                "value",
+                "unit",
+                "n_observations",
+                "percentile",
+                "coverage_note",
+                "definition_version",
+            )
+        }
+        for row in sorted(
+            value_rows,
+            key=lambda item: (
+                str(item["kpi_id"]),
+                str(item["port_code"]),
+                str(item["ship_class"]),
+                str(item["percentile"]),
+            ),
+        )
     ]
-    for row in value_rows:
-        value = "" if row["value"] is None else f"{row['value']:.6g}"
+    return {
+        "schema_version": "blueeconomy.stats.port-kpi-report.v1",
+        "run_id": run_id,
+        "scope": "platform",
+        "period": period,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "source_table_versions": source_table_versions,
+        "query_definitions_sha256": query_hash,
+        "kpi_count": len(KPI_DEFINITIONS),
+        "rows_emitted": len(value_rows),
+        "rows_no_data": sum(1 for row in value_rows if row["value"] is None),
+        "values": values,
+    }
+
+
+def report_core_sha256(report_core: dict[str, Any]) -> str:
+    return hashlib.sha256(canonicalize(report_core).encode("utf-8")).hexdigest()
+
+
+def report_values_csv(report_core: dict[str, Any]) -> str:
+    """Deterministic CSV rendering of the report's KPI value rows."""
+    header = (
+        "kpi_id,period,port_code,ship_class,value,unit,"
+        "n_observations,percentile,coverage_note,definition_version"
+    )
+    lines = [header]
+
+    def cell(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value)
+        if any(character in text for character in ',"\n\r'):
+            return '"' + text.replace('"', '""') + '"'
+        return text
+
+    for row in report_core["values"]:
         lines.append(
-            "| {kpi} | {port} | {ship} | {pct} | {value} | {unit} | {n} | {note} |".format(
-                kpi=row["kpi_id"],
-                port=row["port_code"] or "-",
-                ship=row["ship_class"] or "-",
-                pct=row["percentile"] or "-",
-                value=value,
-                unit=row["unit"],
-                n=row["n_observations"],
-                note=row["coverage_note"] or "",
+            ",".join(
+                cell(row[key])
+                for key in (
+                    "kpi_id",
+                    "period",
+                    "port_code",
+                    "ship_class",
+                    "value",
+                    "unit",
+                    "n_observations",
+                    "percentile",
+                    "coverage_note",
+                    "definition_version",
+                )
             )
         )
     return "\n".join(lines) + "\n"
 
 
-def build_report_document(
-    *,
-    period: str,
-    run_id: str,
-    source_table: str,
-    table_version: int,
-    query_hash: str,
-    input_event_count: int,
-    value_rows: list[dict[str, Any]],
-    generated_at: datetime,
-    report_markdown: str,
-) -> dict[str, Any]:
-    """Assemble the signable report document (markdown + machine-readable rows)."""
-    return {
-        "document_type": "platform_port_kpi_report",
-        "period": period,
-        "run_id": run_id,
-        "source": {
-            "table": source_table,
-            "table_version": table_version,
-            "query_definitions_sha256": query_hash,
-            "input_event_count": input_event_count,
-        },
-        "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
-        "report_markdown": report_markdown,
-        "rows": [
-            {
-                "kpi_id": row["kpi_id"],
-                "period": row["period"],
-                "port_code": row["port_code"],
-                "ship_class": row["ship_class"],
-                "percentile": row["percentile"],
-                "value": row["value"],
-                "unit": row["unit"],
-                "n_observations": row["n_observations"],
-                "coverage_note": row["coverage_note"],
-                "definition_version": row["definition_version"],
-            }
-            for row in value_rows
-        ],
-    }
+# ---------------------------------------------------------------------------
+# Delta persistence + signed report artefact
+# ---------------------------------------------------------------------------
+
+FACTS_TABLE_DESCRIPTION = (
+    "Platform gold port_call_facts: silver-derived per-call fact rows feeding "
+    "the port KPI rollups (vessel identity hashed; append-only)"
+)
+VALUES_TABLE_DESCRIPTION = (
+    "Platform gold port_kpi_values: one row per KPI x period x port x segment; "
+    "no-data rows are first class (value null + coverage note); append-only"
+)
+RUNS_TABLE_DESCRIPTION = (
+    "Platform gold port_kpi_runs: provenance manifest, one row per computation "
+    "run with pinned source table versions and query hash; append-only"
+)
 
 
-def _write_gold_table(
+@dataclass(frozen=True)
+class PortStatisticsRunResult:
+    run_id: str
+    period: str
+    report_sha256: str
+    rows_emitted: int
+    rows_no_data: int
+    facts_rows: int
+    source_table_versions: dict[str, int]
+    runs_table_version: int
+    values_table_version: int
+    facts_table_version: int
+    report_json_path: str
+    report_csv_path: str
+
+
+def _scope_root_from_writer(writer: SegregatedDeltaWriter) -> str:
+    return writer.roots.gold.rsplit("/", 2)[0]
+
+
+def _reports_directory_uri(writer: SegregatedDeltaWriter) -> str:
+    base = writer.roots.gold.rsplit("/", 1)[0]
+    uri = f"{base}/{REPORTS_DIR_NAME}"
+    require_scope_table_uri(writer.scope, uri)
+    return uri
+
+
+def _write_report_artefacts(
     writer: SegregatedDeltaWriter,
-    table_uri: str,
-    table_name: str,
-    schema: pa.Schema,
-    rows: list[dict[str, Any]],
-) -> None:
-    if rows:
-        writer.write(table_uri, pa.Table.from_pylist(rows, schema=schema), mode="append")
-        return
-    # Empty runs still create the table so downstream readers find the schema.
-    writer.write(table_uri, schema.empty_table(), mode="append")
+    run_id: str,
+    artefact: dict[str, Any],
+    csv_text: str,
+) -> tuple[str, str]:
+    reports_dir = Path(_reports_directory_uri(writer))
+    reports_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
+    json_path = reports_dir / f"{run_id}.json"
+    csv_path = reports_dir / f"{run_id}.csv"
+    for path, text in (
+        (json_path, json.dumps(artefact, indent=2, sort_keys=True) + "\n"),
+        (csv_path, csv_text),
+    ):
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(text, encoding="utf-8")
+        temporary.chmod(0o640)
+        temporary.replace(path)
+    return str(json_path), str(csv_path)
 
 
-def assemble_port_kpi_run(
-    scope: LakehouseScope,
+def run_port_statistics(
+    writer: SegregatedDeltaWriter,
     period: str,
-    *,
     signing_key: Ed25519PrivateKey,
-    key_id: str,
-    silver_version: int | None = None,
-    reports_dir: Path | None = None,
-) -> dict[str, Any]:
-    """Run one gold-assembly pass for *period* inside *scope*.
+    signing_kid: str,
+    computed_at: datetime | None = None,
+) -> PortStatisticsRunResult:
+    """Execute one reproducible port-KPI gold run for ``period`` (YYYY-MM).
 
-    Steps: pin the silver table version, read events at that version, build
-    facts, compute KPI observations, emit value rows (no-data + gap rows
-    included), write the runs/values/facts gold tables, and emit a signed
-    report artefact (Ed25519 JWS, ``signature-algorithm: Ed25519``). The run
-    row is written before the value rows so every value row's ``run_id``
-    resolves against ``port_kpi_runs``.
+    The platform silver events table is read at a pinned Delta version; the
+    run id and ``report_sha256`` are pure functions of the period, the pinned
+    source versions and the pinned query definitions, so replaying the run
+    over the same table version reproduces identical hashes (determinism /
+    replay contract). The JSON report artefact is signed with the fleet
+    envelope v1.0 JWS-EdDSA scheme and written beside the gold tables.
     """
+    if writer.scope is not LakehouseScope.PLATFORM:
+        raise ValueError("port statistics gold rollup is only defined for the platform scope")
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.pipeline.port_statistics") as span:
+        span.set_attribute("lakehouse.scope", writer.scope.value)
+        span.set_attribute("stats.period", period)
+        result = _run_port_statistics(writer, period, signing_key, signing_kid, computed_at)
+        span.set_attribute("stats.run_id", result.run_id)
+        span.set_attribute("stats.rows_emitted", result.rows_emitted)
+        span.set_attribute("stats.rows_no_data", result.rows_no_data)
+        return result
+
+
+def _run_port_statistics(
+    writer: SegregatedDeltaWriter,
+    period: str,
+    signing_key: Ed25519PrivateKey,
+    signing_kid: str,
+    computed_at: datetime | None,
+) -> PortStatisticsRunResult:
     period_start, period_end = parse_period(period)
-    started_at = datetime.now(tz=UTC)
-    query_hash = query_definitions_sha256()
+    silver_uri = writer.table_uri("silver")
+    try:
+        pinned_version = DeltaTable(silver_uri).version()
+    except TableNotFoundError:
+        raise ValueError(
+            "cannot compute port statistics before the platform silver table exists"
+        ) from None
+    source_table_versions = {SILVER_TABLE_LABEL: pinned_version}
+    silver_events = (
+        DeltaTable(silver_uri, version=pinned_version)
+        .to_pyarrow_table(columns=["event_id", "event_type", "occurred_at", "payload_json"])
+        .to_pylist()
+    )
 
-    silver_uri = require_scope_table_uri(scope, "silver", "events")
-    if silver_version is None:
-        try:
-            silver_version = DeltaTable(silver_uri).version()
-        except TableNotFoundError:
-            raise ValueError(
-                f"silver events table does not exist at {silver_uri!r}; "
-                "no KPI run is possible without source data"
-            ) from None
-    source_table = SILVER_TABLE_LABEL
-
-    silver_events = read_silver_events_at_version(silver_uri, silver_version)
     facts = assemble_port_call_facts(silver_events, period_start, period_end)
     gate_scans = extract_gate_scans(silver_events, period_start, period_end)
     bookings = extract_bookings(silver_events, period_start, period_end)
-
     observations = compute_kpi_observations(facts, gate_scans, bookings)
     ports = discover_ports(facts, gate_scans, bookings)
 
-    run_id = run_id_for(period, source_table, silver_version, query_hash)
-    computed_at = datetime.now(tz=UTC)
+    query_hash = query_definitions_sha256()
+    run_id = build_run_id(
+        _scope_root_from_writer(writer), period, source_table_versions, query_hash
+    )
+    computed = (computed_at or datetime.now(UTC)).astimezone(UTC)
+
+    # One OTel span per KPI (no-op when telemetry is disabled).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    tracer = get_tracer()
+    for definition in KPI_DEFINITIONS:
+        with tracer.start_as_current_span("lakehouse.gold.kpi") as kpi_span:
+            kpi_span.set_attribute("kpi_id", definition.kpi_id)
+            kpi_span.set_attribute("run_id", run_id)
+            kpi_span.set_attribute(
+                "n_observations",
+                sum(
+                    observation["n_observations"]
+                    for observation in observations.get(definition.kpi_id, [])
+                ),
+            )
+
     value_rows = emit_value_rows(
         observations,
         ports,
         period,
         run_id,
-        source_table,
-        silver_version,
+        SILVER_TABLE_LABEL,
+        pinned_version,
         query_hash,
-        computed_at,
+        computed,
     )
+    for row in value_rows:
+        row["value_key"] = value_row_key(row)
 
-    generated_at = datetime.now(tz=UTC)
-    report_markdown = render_report_markdown(
-        period=period,
-        run_id=run_id,
-        source_table=source_table,
-        table_version=silver_version,
-        query_hash=query_hash,
-        input_event_count=len(silver_events),
-        value_rows=value_rows,
-        generated_at=generated_at,
+    scope_root = _scope_root_from_writer(writer)
+    facts_uri = scope_layer_table_uri(LakehouseScope.PLATFORM, scope_root, "gold", FACTS_TABLE_NAME)
+    values_uri = scope_layer_table_uri(
+        LakehouseScope.PLATFORM, scope_root, "gold", VALUES_TABLE_NAME
     )
-    report_document = build_report_document(
-        period=period,
-        run_id=run_id,
-        source_table=source_table,
-        table_version=silver_version,
-        query_hash=query_hash,
-        input_event_count=len(silver_events),
-        value_rows=value_rows,
-        generated_at=generated_at,
-        report_markdown=report_markdown,
+    runs_uri = scope_layer_table_uri(LakehouseScope.PLATFORM, scope_root, "gold", RUNS_TABLE_NAME)
+
+    if facts:
+        facts_version, _, _ = append_rows(
+            facts_uri,
+            facts,
+            key_column="port_call_id",
+            table_description=FACTS_TABLE_DESCRIPTION,
+            arrow_schema=PORT_CALL_FACTS_SCHEMA,
+            table_name="platform_gold_port_call_facts",
+        )
+    else:
+        # No port calls in the period: the facts table is untouched; record a
+        # truthful "no write" marker in the run result.
+        facts_version = -1
+
+    report_core = build_report_core(
+        run_id, period, period_start, period_end, source_table_versions, query_hash, value_rows
     )
-    signed_report = sign_document(report_document, signing_key, key_id=key_id)
-
-    reports_root = reports_dir or (Path(scope.root_uri) / "gold" / REPORTS_DIR_NAME)
-    reports_root.mkdir(parents=True, exist_ok=True)
-    report_path = reports_root / f"port_kpi_{period}_{run_id}.json"
-    report_path.write_text(canonical_json(signed_report) + "\n", encoding="utf-8")
-
-    writer = SegregatedDeltaWriter(scope)
-    gold_layer_uri = scope_layer_table_uri(scope, "gold", "")
-    facts_uri = f"{gold_layer_uri}{FACTS_TABLE_NAME}"
-    runs_uri = f"{gold_layer_uri}{RUNS_TABLE_NAME}"
-    values_uri = f"{gold_layer_uri}{VALUES_TABLE_NAME}"
+    report_hash = report_core_sha256(report_core)
+    artefact = {
+        **report_core,
+        "computed_at": computed.isoformat(),
+        "report_sha256": report_hash,
+        "provenance": {
+            "principalId": "blueeconomy-data-platform",
+            "principalRole": "stats-gold-assembly",
+        },
+    }
+    signed_artefact = sign_document(artefact, signing_key, signing_kid)
 
     run_row = {
         "run_id": run_id,
+        "computed_at": computed,
         "period": period,
-        "source_table": source_table,
-        "table_version": silver_version,
-        "query_hash": query_hash,
-        "definitions_version": "1.0.0",
-        "started_at": started_at,
-        "finished_at": datetime.now(tz=UTC),
-        "input_event_count": len(silver_events),
-        "report_path": str(report_path),
+        "period_start": period_start,
+        "period_end": period_end,
+        "scope": LakehouseScope.PLATFORM.value,
+        "source_table_versions_json": canonical_json(source_table_versions),
+        "query_definitions_sha256": query_hash,
+        "kpi_count": len(KPI_DEFINITIONS),
+        "rows_emitted": len(value_rows),
+        "rows_no_data": sum(1 for row in value_rows if row["value"] is None),
+        "report_sha256": report_hash,
     }
-    _write_gold_table(writer, facts_uri, FACTS_TABLE_NAME, PORT_CALL_FACTS_SCHEMA, facts)
-    _write_gold_table(writer, runs_uri, RUNS_TABLE_NAME, PORT_KPI_RUNS_SCHEMA, [run_row])
-    _write_gold_table(writer, values_uri, VALUES_TABLE_NAME, PORT_KPI_VALUES_SCHEMA, value_rows)
-
-    return {
-        "run_id": run_id,
-        "period": period,
-        "source_table": source_table,
-        "table_version": silver_version,
-        "query_hash": query_hash,
-        "input_event_count": len(silver_events),
-        "fact_count": len(facts),
-        "value_row_count": len(value_rows),
-        "report_path": str(report_path),
-    }
-
-
-def append_facts(
-    scope: LakehouseScope, facts: list[dict[str, Any]]
-) -> None:
-    """Append pre-built fact rows (testing seam used by gold-assembly tests)."""
-    gold_layer_uri = scope_layer_table_uri(scope, "gold", "")
-    append_rows(f"{gold_layer_uri}{FACTS_TABLE_NAME}", PORT_CALL_FACTS_SCHEMA, facts)
+    runs_version, _, _ = append_rows(
+        runs_uri,
+        [run_row],
+        key_column="run_id",
+        table_description=RUNS_TABLE_DESCRIPTION,
+        arrow_schema=PORT_KPI_RUNS_SCHEMA,
+        table_name="platform_gold_port_kpi_runs",
+    )
+    values_version, _, _ = append_rows(
+        values_uri,
+        value_rows,
+        key_column="value_key",
+        table_description=VALUES_TABLE_DESCRIPTION,
+        arrow_schema=PORT_KPI_VALUES_SCHEMA,
+        table_name="platform_gold_port_kpi_values",
+    )
+    json_path, csv_path = _write_report_artefacts(
+        writer, run_id, signed_artefact, report_values_csv(report_core)
+    )
+    return PortStatisticsRunResult(
+        run_id=run_id,
+        period=period,
+        report_sha256=report_hash,
+        rows_emitted=len(value_rows),
+        rows_no_data=sum(1 for row in value_rows if row["value"] is None),
+        facts_rows=len(facts),
+        source_table_versions=source_table_versions,
+        runs_table_version=runs_version,
+        values_table_version=values_version,
+        facts_table_version=facts_version,
+        report_json_path=json_path,
+        report_csv_path=csv_path,
+    )
 
 
 __all__ = [
@@ -1072,27 +1210,18 @@ __all__ = [
     "NO_DATA_NOTE",
     "PERIOD_PATTERN",
     "PORT_CALL_EVENT_TYPE",
-    "PORT_CALL_FACTS_SCHEMA",
-    "PORT_CALL_STATUSES",
     "PORT_KPI_RUNS_SCHEMA",
     "PORT_KPI_VALUES_SCHEMA",
-    "P50",
-    "P90",
+    "PORT_CALL_FACTS_SCHEMA",
     "REPORTS_DIR_NAME",
     "RUNS_TABLE_NAME",
     "SILVER_TABLE_LABEL",
     "STATS_GAPS",
-    "STATS_GAP_BY_ID",
-    "UNLOCODE_PATTERN",
-    "VALUES_TABLE_NAME",
-    "KpiDefinition",
-    "StatsGap",
-    "append_facts",
+    "PortStatisticsRunResult",
     "assemble_port_call_facts",
-    "assemble_port_kpi_run",
-    "build_report_document",
+    "build_report_core",
+    "build_run_id",
     "compute_kpi_observations",
-    "decode_silver_event",
     "discover_ports",
     "emit_value_rows",
     "extract_bookings",
@@ -1100,7 +1229,8 @@ __all__ = [
     "parse_period",
     "percentile_linear",
     "query_definitions_sha256",
-    "read_silver_events_at_version",
-    "render_report_markdown",
-    "run_id_for",
+    "report_core_sha256",
+    "report_values_csv",
+    "run_port_statistics",
+    "value_row_key",
 ]
