@@ -383,7 +383,7 @@ def read_identity_rows(
 # Row attributes excluded from immutable-replay identity comparison: they
 # record processing instants or optional labels, not event content.
 REPLAY_GUARD_EXCLUDED_COLUMNS = frozenset(
-    {"ingested_at", "promoted_at", "record_classification", "executed_at"}
+    {"ingested_at", "promoted_at", "record_classification", "executed_at", "computed_at"}
 )
 
 
