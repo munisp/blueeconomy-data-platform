@@ -7,13 +7,21 @@ invalid:
 
 - ``BLUEECONOMY_GOLD_SCOPE`` (required): ``cvff`` runs the silver-to-gold
   ledger-commitment rollup; ``fisheries`` runs the export-consignment gold
-  assembly followed by a clearance-filtered export read. No other scope has
-  a defined gold rollup, so any other value fails closed.
+  assembly followed by a clearance-filtered export read; ``platform`` runs
+  the port-KPI statistics rollup (phase 8); ``mrv`` runs the MRV
+  ``vessel_annual`` gold assembly; ``bluecarbon`` runs the Blue-Carbon
+  ``public_registry`` gold projection. No other scope has a defined gold
+  rollup, so any other value fails closed.
 - ``BLUEECONOMY_GOLD_SCOPE_ROOT_URI`` (required): the segregated scope root
   URI. :class:`SegregatedDeltaWriter` enforces the scope boundary on it.
 - ``BLUEECONOMY_GOLD_REPORT`` (required): non-secret JSON run-report path.
 - ``BLUEECONOMY_GOLD_EXPORT_PATH`` (required for the ``fisheries`` scope):
   JSON export of the consignment rows visible at the configured clearance.
+- ``BLUEECONOMY_GOLD_STATS_PERIOD`` (required for the ``platform`` scope):
+  the ``YYYY-MM`` computation period for the port-KPI statistics rollup.
+- ``BLUEECONOMY_SIGNING_KEY_SEED`` / ``BLUEECONOMY_SIGNING_KID`` (required
+  for the ``platform`` scope): env-only Ed25519 report-signing key and kid
+  for the signed statistics report artefact (envelope v1.0 JWS scheme).
 - ``BLUEECONOMY_GOLD_CLEARANCE`` (optional): clearance claim for the export
   read path. It defaults to ``UNCLASSIFIED`` — the most restrictive
   clearance — so an unconfigured run exports only consignments whose source
@@ -36,17 +44,34 @@ from blueeconomy_data_platform.export_consignment import (
     assemble_export_consignment_gold,
     read_export_consignments,
 )
+from blueeconomy_data_platform.bluecarbon_gold import assemble_bluecarbon_public_registry_gold
 from blueeconomy_data_platform.medallion import curate_gold
+from blueeconomy_data_platform.mrv_gold import assemble_mrv_vessel_annual_gold
+from blueeconomy_data_platform.port_statistics import (
+    PortStatisticsRunResult,
+    parse_period,
+    run_port_statistics,
+)
 from blueeconomy_data_platform.segregation import LakehouseScope, SegregatedDeltaWriter
+from blueeconomy_data_platform.signature_verification import load_signing_key_from_env
 
 ENV_SCOPE = "BLUEECONOMY_GOLD_SCOPE"
 ENV_SCOPE_ROOT_URI = "BLUEECONOMY_GOLD_SCOPE_ROOT_URI"
 ENV_REPORT = "BLUEECONOMY_GOLD_REPORT"
 ENV_EXPORT_PATH = "BLUEECONOMY_GOLD_EXPORT_PATH"
 ENV_CLEARANCE = "BLUEECONOMY_GOLD_CLEARANCE"
+ENV_STATS_PERIOD = "BLUEECONOMY_GOLD_STATS_PERIOD"
 
 # Scopes with a defined gold-layer rollup; every other scope fails closed.
-GOLD_ASSEMBLY_SCOPES = frozenset({LakehouseScope.CVFF, LakehouseScope.FISHERIES})
+GOLD_ASSEMBLY_SCOPES = frozenset(
+    {
+        LakehouseScope.CVFF,
+        LakehouseScope.FISHERIES,
+        LakehouseScope.PLATFORM,
+        LakehouseScope.MRV,
+        LakehouseScope.BLUECARBON,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +81,7 @@ class GoldAssemblyConfig:
     clearance: Clearance
     export_path: Path | None
     report_path: Path
+    stats_period: str | None
 
 
 @dataclass(frozen=True)
@@ -69,6 +95,8 @@ class GoldAssemblyReport:
     gold_table_version: int
     gold_rows: int
     exported_rows: int | None
+    stats_run_id: str | None
+    stats_report_sha256: str | None
 
 
 def _require_env(environment: Mapping[str, str], name: str) -> str:
@@ -101,12 +129,20 @@ def load_config(environment: Mapping[str, str]) -> GoldAssemblyConfig:
         export_path = Path(_require_env(environment, ENV_EXPORT_PATH))
         if export_path.resolve(strict=False) == report_path.resolve(strict=False):
             raise ValueError("export path must not overwrite the report path")
+    stats_period: str | None = None
+    if scope is LakehouseScope.PLATFORM:
+        stats_period = _require_env(environment, ENV_STATS_PERIOD)
+        # Fail closed at configuration time on a malformed period or a
+        # missing/malformed report-signing key (secrets are env-only).
+        parse_period(stats_period)
+        load_signing_key_from_env(environment)
     return GoldAssemblyConfig(
         scope=scope,
         scope_root_uri=scope_root_uri,
         clearance=clearance,
         export_path=export_path,
         report_path=report_path,
+        stats_period=stats_period,
     )
 
 
@@ -144,9 +180,23 @@ def _run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
     started_at = datetime.now(UTC)
     writer = SegregatedDeltaWriter(config.scope, config.scope_root_uri)
     exported_rows: int | None = None
+    stats_result: PortStatisticsRunResult | None = None
     if config.scope is LakehouseScope.CVFF:
         assembly = "cvff-silver-gold-ledger-commitments"
         table_version, gold_rows = curate_gold(writer)
+    elif config.scope is LakehouseScope.MRV:
+        assembly = "mrv-gold-vessel-annual"
+        table_version, gold_rows = assemble_mrv_vessel_annual_gold(writer)
+    elif config.scope is LakehouseScope.BLUECARBON:
+        assembly = "bluecarbon-gold-public-registry"
+        table_version, gold_rows = assemble_bluecarbon_public_registry_gold(writer)
+    elif config.scope is LakehouseScope.PLATFORM:
+        assembly = "platform-gold-port-statistics"
+        if config.stats_period is None:
+            raise ValueError(f"{ENV_STATS_PERIOD} is required for the platform scope")
+        signing_key, signing_kid = load_signing_key_from_env()
+        stats_result = run_port_statistics(writer, config.stats_period, signing_key, signing_kid)
+        table_version, gold_rows = stats_result.values_table_version, stats_result.rows_emitted
     else:
         assembly = "fisheries-gold-export-consignments"
         table_version, gold_rows = assemble_export_consignment_gold(writer)
@@ -165,6 +215,8 @@ def _run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
         gold_table_version=table_version,
         gold_rows=gold_rows,
         exported_rows=exported_rows,
+        stats_run_id=stats_result.run_id if stats_result is not None else None,
+        stats_report_sha256=stats_result.report_sha256 if stats_result is not None else None,
     )
 
 

@@ -239,14 +239,25 @@ class EnvelopeSignatureVerifier:
         return kid
 
 
-def sign_envelope_for_test(
-    envelope: dict[str, Any], private_key: Ed25519PrivateKey, kid: str
-) -> str:
-    """Produce the fleet JWS for *envelope*; test/fixture helper only."""
-    provenance = envelope.get("provenance")
+def sign_document(
+    document: dict[str, Any], private_key: Ed25519PrivateKey, kid: str
+) -> dict[str, Any]:
+    """Sign *document* under the fleet scheme and return the signed copy.
+
+    Production counterpart of the consumer-side verification above: the
+    document must carry a ``provenance`` object; the returned copy has
+    ``provenance.signature`` set to the JWS compact serialization
+    (EdDSA/Ed25519) over the JCS-canonicalized document minus the signature,
+    with protected header exactly ``{"alg":"EdDSA","kid":kid}``. Used by the
+    statistics gold assembly to sign its report artefacts
+    (``provenance.principalId``/``principalRole`` are supplied by the caller).
+    """
+    provenance = document.get("provenance")
     if not isinstance(provenance, dict):
-        raise ValueError("envelope carries no provenance object")
-    signed_document = {key: value for key, value in envelope.items() if key != "provenance"}
+        raise ValueError("document carries no provenance object")
+    signed = dict(document)
+    signed["provenance"] = dict(provenance)
+    signed_document = {key: value for key, value in signed.items() if key != "provenance"}
     signed_document["provenance"] = {
         key: value for key, value in provenance.items() if key != "signature"
     }
@@ -267,7 +278,58 @@ def sign_envelope_for_test(
         .rstrip(b"=")
         .decode("ascii")
     )
-    return f"{header}.{payload}.{signature}"
+    signed["provenance"]["signature"] = f"{header}.{payload}.{signature}"
+    return signed
+
+
+SIGNING_KEY_SEED_ENV = "BLUEECONOMY_SIGNING_KEY_SEED"
+SIGNING_KID_ENV = "BLUEECONOMY_SIGNING_KID"
+
+
+def load_signing_key_from_env(
+    env: Mapping[str, str] | None = None,
+) -> tuple[Ed25519PrivateKey, str]:
+    """Fail-closed loader for the report-signing key (secrets are env-only).
+
+    ``BLUEECONOMY_SIGNING_KEY_SEED`` carries the 32-byte Ed25519 seed as 64
+    lowercase hex characters or unpadded base64url;
+    ``BLUEECONOMY_SIGNING_KID`` carries the producer kid the signature is
+    emitted under. Missing or malformed values are fatal.
+    """
+    source = os.environ if env is None else env
+    raw_seed = source.get(SIGNING_KEY_SEED_ENV, "")
+    kid = source.get(SIGNING_KID_ENV, "")
+    if not raw_seed or raw_seed != raw_seed.strip():
+        raise ValueError(f"{SIGNING_KEY_SEED_ENV} must be set to a canonical seed (fail-closed)")
+    if not kid or not KID_PATTERN.fullmatch(kid):
+        raise ValueError(f"{SIGNING_KID_ENV} must be set to a canonical kid (fail-closed)")
+    seed: bytes
+    if re.fullmatch(r"[0-9a-f]{64}", raw_seed):
+        seed = bytes.fromhex(raw_seed)
+    elif "=" not in raw_seed and re.fullmatch(r"[A-Za-z0-9_-]{43}", raw_seed):
+        seed = base64.urlsafe_b64decode(raw_seed + "=")
+    else:
+        raise ValueError(
+            f"{SIGNING_KEY_SEED_ENV} must be 64 lowercase hex characters or a "
+            "43-character unpadded base64url Ed25519 seed (fail-closed)"
+        )
+    if len(seed) != 32:
+        raise ValueError(f"{SIGNING_KEY_SEED_ENV} must decode to a 32-byte Ed25519 seed")
+    return Ed25519PrivateKey.from_private_bytes(seed), kid
+
+
+def sign_envelope_for_test(
+    envelope: dict[str, Any], private_key: Ed25519PrivateKey, kid: str
+) -> str:
+    """Produce the fleet JWS for *envelope*; test/fixture helper only."""
+    provenance = envelope.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("envelope carries no provenance object")
+    signed = sign_document(envelope, private_key, kid)
+    signature = signed["provenance"]["signature"]
+    if not isinstance(signature, str):
+        raise ValueError("signing did not produce a provenance signature")
+    return signature
 
 
 def export_public_key_for_test(public_key: Ed25519PublicKey) -> str:

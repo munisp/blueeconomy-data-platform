@@ -4,6 +4,8 @@ Workstream C (CVFF fintech) events are physically segregated from Workstream A
 (ports.*) and Workstream B (ferries.*) events, and the phase-2 lakehouse scopes
 extend the same model to Workstream D (seafarer credentials), Workstream E
 (fisheries catch/coldchain/export) and Workstream F (classified ISR tracks).
+Phase 8 adds the MRV emissions scope (``mrv.*`` topics) and the Blue-Carbon
+registry scope (``bluecarbon.*`` topics) under the identical boundary rules.
 Classification is not a routing hint: :class:`SegregatedDeltaWriter` is
 initialized for exactly one lakehouse scope and raises
 :class:`BoundaryViolationError` on any cross-boundary write attempt, including
@@ -26,12 +28,16 @@ PLATFORM_CLASSIFICATIONS = frozenset(
 SEAFARER_CLASSIFICATION = "seafarer_confidential"
 FISHERIES_CLASSIFICATION = "fisheries_operational"
 ISR_CLASSIFICATION = "isr_classified"
+MRV_CLASSIFICATION = "mrv_confidential"
+BLUECARBON_CLASSIFICATION = "bluecarbon_internal"
 
 CVFF_TOPIC_PREFIX = "cvff."
 PLATFORM_TOPIC_PREFIXES = ("ports.", "ferries.", "vessels.")
 SEAFARER_TOPIC_PREFIXES = ("seafarer.",)
 FISHERIES_TOPIC_PREFIXES = ("fisheries.", "coldchain.", "export.")
 ISR_TOPIC_PREFIXES = ("maritime.isr.", "maritime.behaviour.", "maritime.outcome.")
+MRV_TOPIC_PREFIXES = ("mrv.",)
+BLUECARBON_TOPIC_PREFIXES = ("bluecarbon.",)
 
 CVFF_ROOT_COMPONENT_PATTERN = re.compile(r"^cvff($|[_-])")
 
@@ -48,6 +54,8 @@ class LakehouseScope(Enum):
     SEAFARER = "seafarer"
     FISHERIES = "fisheries"
     ISR = "isr"
+    MRV = "mrv"
+    BLUECARBON = "bluecarbon"
 
     @property
     def layer_prefix(self) -> str:
@@ -65,6 +73,8 @@ SEGREGATED_SCOPES = frozenset(
         LakehouseScope.SEAFARER,
         LakehouseScope.FISHERIES,
         LakehouseScope.ISR,
+        LakehouseScope.MRV,
+        LakehouseScope.BLUECARBON,
     }
 )
 
@@ -74,6 +84,8 @@ SCOPE_TOPIC_PREFIXES: dict[LakehouseScope, tuple[str, ...]] = {
     LakehouseScope.SEAFARER: SEAFARER_TOPIC_PREFIXES,
     LakehouseScope.FISHERIES: FISHERIES_TOPIC_PREFIXES,
     LakehouseScope.ISR: ISR_TOPIC_PREFIXES,
+    LakehouseScope.MRV: MRV_TOPIC_PREFIXES,
+    LakehouseScope.BLUECARBON: BLUECARBON_TOPIC_PREFIXES,
 }
 
 SCOPE_CLASSIFICATIONS: dict[LakehouseScope, frozenset[str]] = {
@@ -82,6 +94,8 @@ SCOPE_CLASSIFICATIONS: dict[LakehouseScope, frozenset[str]] = {
     LakehouseScope.SEAFARER: frozenset({SEAFARER_CLASSIFICATION}),
     LakehouseScope.FISHERIES: frozenset({FISHERIES_CLASSIFICATION}),
     LakehouseScope.ISR: frozenset({ISR_CLASSIFICATION}),
+    LakehouseScope.MRV: frozenset({MRV_CLASSIFICATION}),
+    LakehouseScope.BLUECARBON: frozenset({BLUECARBON_CLASSIFICATION}),
 }
 
 
@@ -163,6 +177,10 @@ def map_canonical_classification(classification: str, event_type: str) -> str:
         return FISHERIES_CLASSIFICATION
     if scope is LakehouseScope.ISR:
         return ISR_CLASSIFICATION
+    if scope is LakehouseScope.MRV:
+        return MRV_CLASSIFICATION
+    if scope is LakehouseScope.BLUECARBON:
+        return BLUECARBON_CLASSIFICATION
     return CANONICAL_TO_PLATFORM_LABEL[classification]
 
 
@@ -251,6 +269,29 @@ def build_lakehouse_roots(scope: LakehouseScope, scope_root_uri: str) -> Lakehou
         silver=f"{root}/{prefix}_silver/events",
         gold=f"{root}/{prefix}_gold/events",
     )
+
+
+NAMED_TABLE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def scope_layer_table_uri(
+    scope: LakehouseScope, scope_root_uri: str, layer: str, table_name: str
+) -> str:
+    """Resolve a named table URI inside a scope's medallion layer directory.
+
+    Curated products (for example ``mrv_gold/vessel_annual`` or
+    ``platform_gold/port_kpi_values``) live as named tables beside the
+    layer's canonical ``events`` table. The resolved URI passes through the
+    same boundary guard as every other scope table, so a named table can
+    never escape the writer's segregated root.
+    """
+    if not NAMED_TABLE_PATTERN.fullmatch(table_name):
+        raise BoundaryViolationError(f"named table {table_name!r} is not a governed table name")
+    roots = build_lakehouse_roots(scope, scope_root_uri)
+    base = roots.for_layer(layer).rsplit("/", 1)[0]
+    uri = f"{base}/{table_name}"
+    require_scope_table_uri(scope, uri)
+    return uri
 
 
 def require_scope_table_uri(scope: LakehouseScope, table_uri: str) -> None:

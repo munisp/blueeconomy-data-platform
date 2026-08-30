@@ -29,8 +29,16 @@ CVFF_SCHEMAS = frozenset({"cvff_bronze", "cvff_silver", "cvff_gold"})
 SEAFARER_SCHEMAS = frozenset({"seafarer_bronze", "seafarer_silver", "seafarer_gold"})
 FISHERIES_SCHEMAS = frozenset({"fisheries_bronze", "fisheries_silver", "fisheries_gold"})
 ISR_SCHEMAS = frozenset({"isr_bronze", "isr_silver", "isr_gold"})
+MRV_SCHEMAS = frozenset({"mrv_bronze", "mrv_silver", "mrv_gold"})
+BLUECARBON_SCHEMAS = frozenset({"bluecarbon_bronze", "bluecarbon_silver", "bluecarbon_gold"})
 GOVERNED_SCHEMAS = (
-    PLATFORM_SCHEMAS | CVFF_SCHEMAS | SEAFARER_SCHEMAS | FISHERIES_SCHEMAS | (ISR_SCHEMAS)
+    PLATFORM_SCHEMAS
+    | CVFF_SCHEMAS
+    | SEAFARER_SCHEMAS
+    | FISHERIES_SCHEMAS
+    | ISR_SCHEMAS
+    | MRV_SCHEMAS
+    | BLUECARBON_SCHEMAS
 )
 
 ROLE_NIMASA_APPROVER = "nimasa-approver"
@@ -41,12 +49,21 @@ ROLE_SEAFARER_REGISTRY = "seafarer-registry"
 ROLE_FISHERIES_OPERATIONS = "fisheries-operations"
 ROLE_ISR_ANALYST = "isr-analyst"
 ROLE_INSURER_AGGREGATOR = "insurer-aggregator"
+ROLE_MRV_READER = "mrv-reader"
+ROLE_MRV_VERIFIER = "mrv-verifier"
+ROLE_MRV_FLAG_ADMIN = "mrv-flag-admin"
+ROLE_BC_REGISTRY_ADMIN = "bc-registry-admin"
+ROLE_BC_AUDITOR = "bc-auditor"
+ROLE_STATS_READER = "stats-reader"
 
 CVFF_SCOPED_ROLES = frozenset({ROLE_INDEPENDENT_AUDITOR, ROLE_NIMASA_APPROVER, ROLE_CBN_OBSERVER})
 
 # Read-only role-to-schema grants. Each segregated scope's schemas appear only
 # under that scope's roles; insurer-aggregator is granted only the ISR gold
-# outcome aggregates, never the bronze/silver tracks.
+# outcome aggregates, never the bronze/silver tracks. Phase-8 scopes: MRV
+# schemas are readable only by MRV roles; Blue-Carbon schemas only by registry
+# admin/auditor roles; stats-reader (the ministry statistics surface) reads
+# only the platform gold layer where the published KPI tables live.
 ROLE_READ_GRANTS: dict[str, frozenset[str]] = {
     ROLE_INDEPENDENT_AUDITOR: CVFF_SCHEMAS,
     ROLE_NIMASA_APPROVER: CVFF_SCHEMAS,
@@ -56,6 +73,12 @@ ROLE_READ_GRANTS: dict[str, frozenset[str]] = {
     ROLE_FISHERIES_OPERATIONS: FISHERIES_SCHEMAS,
     ROLE_ISR_ANALYST: ISR_SCHEMAS,
     ROLE_INSURER_AGGREGATOR: frozenset({"isr_gold"}),
+    ROLE_MRV_READER: MRV_SCHEMAS,
+    ROLE_MRV_VERIFIER: MRV_SCHEMAS,
+    ROLE_MRV_FLAG_ADMIN: MRV_SCHEMAS,
+    ROLE_BC_REGISTRY_ADMIN: BLUECARBON_SCHEMAS,
+    ROLE_BC_AUDITOR: BLUECARBON_SCHEMAS,
+    ROLE_STATS_READER: frozenset({"platform_gold"}),
 }
 
 
@@ -96,6 +119,13 @@ SCHEMA_CLASSIFICATION_FLOOR: dict[str, Clearance] = {
     "isr_bronze": Clearance.SECRET,
     "isr_silver": Clearance.SECRET,
     "isr_gold": Clearance.CONFIDENTIAL,
+    # Phase 8: MRV evidence is CONFIDENTIAL throughout; the Blue-Carbon
+    # evidence layers are CONFIDENTIAL while the gold public_registry
+    # projection is the scope's only UNCLASSIFIED (public) artefact.
+    **{schema: Clearance.CONFIDENTIAL for schema in MRV_SCHEMAS},
+    "bluecarbon_bronze": Clearance.CONFIDENTIAL,
+    "bluecarbon_silver": Clearance.CONFIDENTIAL,
+    "bluecarbon_gold": Clearance.UNCLASSIFIED,
 }
 
 
