@@ -91,10 +91,7 @@ def test_kafka_header_carrier_round_trip(memory_exporter):
     # Consumer side: headers back to carrier, parent context + baggage attrs.
     restored = telemetry.kafka_headers_to_carrier(headers)
     extracted = telemetry.extract_context(restored)
-    assert (
-        trace.get_current_span(extracted).get_span_context().trace_id
-        == expected_trace_id
-    )
+    assert trace.get_current_span(extracted).get_span_context().trace_id == expected_trace_id
     assert telemetry.baggage_span_attributes(extracted) == {
         "tenant.id": "tenant-3",
         "agency": "NIMASA",
@@ -118,9 +115,9 @@ def test_extract_message_links_and_tenant_attributes(memory_exporter):
             finally:
                 context.detach(token)
 
-    messages = [
-        _FakeMessage(telemetry.carrier_to_kafka_headers(c)) for c in carriers
-    ] + [_FakeMessage(None)]
+    messages = [_FakeMessage(telemetry.carrier_to_kafka_headers(c)) for c in carriers] + [
+        _FakeMessage(None)
+    ]
     parent, links = telemetry.extract_message_links(messages)
     assert parent is not None
     assert len(links) == 1  # second carrier + headerless message skipped
@@ -153,9 +150,7 @@ def test_medallion_spans_noop_when_disabled(tmp_path, monkeypatch):
 
     from blueeconomy_data_platform.ingest import append_events
 
-    version, written, already_present = append_events(
-        str(tmp_path / "bronze"), [internal_event()]
-    )
+    version, written, already_present = append_events(str(tmp_path / "bronze"), [internal_event()])
     assert (version, written, already_present) == (0, 1, 0)
 
 

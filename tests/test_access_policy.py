@@ -149,3 +149,48 @@ def test_row_level_clearance_filtering() -> None:
     visible = filter_records_by_clearance(records, "CONFIDENTIAL")
     assert [row["event_id"] for row in visible] == ["a"]
     assert filter_records_by_clearance(records, "SECRET") == records[:2]
+
+
+# ---------------------------------------------------------------------------
+# Phase-8 scope roles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ("mrv-reader", "mrv-verifier", "mrv-flag-admin"))
+def test_phase8_mrv_roles_read_only_mrv_schemas(role: str) -> None:
+    # MRV evidence is CONFIDENTIAL throughout: the clearance floor applies.
+    for schema in ("mrv_bronze", "mrv_silver", "mrv_gold"):
+        authorize_read([role], schema, clearance=Clearance.CONFIDENTIAL)
+        with pytest.raises(AccessDeniedError):
+            authorize_read([role], schema)
+    for schema in (
+        "platform_gold",
+        "cvff_gold",
+        "bluecarbon_gold",
+        "isr_gold",
+    ):
+        with pytest.raises(AccessDeniedError):
+            authorize_read([role], schema, clearance=Clearance.SECRET)
+    with pytest.raises(AccessDeniedError, match="read-only"):
+        authorize_write([role], "mrv_bronze")
+
+
+@pytest.mark.parametrize("role", ("bc-registry-admin", "bc-auditor"))
+def test_phase8_bluecarbon_roles_read_only_bluecarbon_schemas(role: str) -> None:
+    # Evidence layers sit at the CONFIDENTIAL floor; the gold public_registry
+    # projection is the scope's only UNCLASSIFIED (public) artefact.
+    for schema in ("bluecarbon_bronze", "bluecarbon_silver"):
+        authorize_read([role], schema, clearance=Clearance.CONFIDENTIAL)
+        with pytest.raises(AccessDeniedError):
+            authorize_read([role], schema)
+    authorize_read([role], "bluecarbon_gold")
+    for schema in ("mrv_gold", "cvff_gold", "platform_bronze"):
+        with pytest.raises(AccessDeniedError):
+            authorize_read([role], schema, clearance=Clearance.SECRET)
+
+
+def test_phase8_stats_reader_reads_platform_gold_only() -> None:
+    authorize_read(["stats-reader"], "platform_gold")
+    for schema in ("platform_bronze", "platform_silver", "mrv_gold", "bluecarbon_gold"):
+        with pytest.raises(AccessDeniedError):
+            authorize_read(["stats-reader"], schema)

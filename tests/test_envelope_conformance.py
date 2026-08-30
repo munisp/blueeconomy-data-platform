@@ -53,6 +53,16 @@ PRODUCER_EXPECTATIONS = {
         LakehouseScope.SEAFARER,
         "seafarer_confidential",
     ),
+    "geo-service-mrv.json": (
+        "blueeconomy-geo-service",
+        LakehouseScope.MRV,
+        "mrv_confidential",
+    ),
+    "financial-controls-bluecarbon.json": (
+        "financial-controls",
+        LakehouseScope.BLUECARBON,
+        "bluecarbon_internal",
+    ),
 }
 
 
