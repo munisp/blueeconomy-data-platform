@@ -282,6 +282,12 @@ geolibre-wasm==1.5.2 \
     --hash=sha256:38c75a2efb13a7eb3bce25c5871a1b02e6cb7a3efb9f7268d5a5d0979d356e6f \
     --hash=sha256:e739033d74ff0c600161a0f14cad21bcc02b4443afe498a4540e46016743c664
     # via pyproject.toml
+googleapis-common-protos==1.75.2 \
+    --hash=sha256:6b83302f554ea93a0f48409c7fc2050f954bcbcddb7e3a9c76d4a823cb22920e
+    # via opentelemetry-proto
+grpcio==1.83.1 \
+    --hash=sha256:72578aa07a4008f17521ef52debcc3acfd1e2c5426243bc3ffb56a38bfe610b7
+    # via opentelemetry-exporter-otlp-proto-grpc
 jsonschema==4.26.0 \
     --hash=sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326 \
     --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
@@ -290,6 +296,27 @@ jsonschema-specifications==2025.9.1 \
     --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe \
     --hash=sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d
     # via jsonschema
+opentelemetry-api==1.44.0 \
+    --hash=sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef
+    # via blueeconomy-data-platform (pyproject.toml)
+opentelemetry-exporter-otlp-proto-common==1.44.0 \
+    --hash=sha256:9a9fe61bba73d802904bc989f1d6b4a7b1ee40f06c40e98d6f85af65aaebb694
+    # via opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-exporter-otlp-proto-grpc==1.44.0 \
+    --hash=sha256:6a1a645ea182a2f59440c51fa8301d309f3324a8f9d65f8395584b064b67ee4e
+    # via blueeconomy-data-platform (pyproject.toml)
+opentelemetry-proto==1.44.0 \
+    --hash=sha256:898b155a0e1557afd867478fb6158e8122a46329ca0bb8dc53cc55e98f017f56
+    # via opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-sdk==1.44.0 \
+    --hash=sha256:df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad
+    # via blueeconomy-data-platform (pyproject.toml)
+opentelemetry-semantic-conventions==0.65b0 \
+    --hash=sha256:1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb
+    # via opentelemetry-sdk
+protobuf==7.36.0 \
+    --hash=sha256:53374d53fc29a67f7dbbf0ade47d7526a0f0137bf0f9c90e48d8a60790ef748c
+    # via opentelemetry-proto
 pyais==3.2.1 \
     --hash=sha256:bebe0f37c12ee41548710c58bb5df201867a8e21ff520dbd67170a58ccecfbbe \
     --hash=sha256:ff755ab8caeb617e7b2e0d97664e97f1ee5720dd783048d7366d7c764875b904
