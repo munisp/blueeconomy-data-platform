@@ -211,3 +211,168 @@ def test_missing_scope_root_fails_closed(
     with pytest.raises(SystemExit):
         main()
     assert "cvff scope root must terminate" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Phase-8 dispatch: platform statistics, mrv, bluecarbon
+# ---------------------------------------------------------------------------
+
+MRV_TEST_SIGNING_KID = "blueeconomy-data-platform-test-0"
+MRV_TEST_SIGNING_SEED = "61" * 32  # fixture-only seed material; never a real secret
+
+
+def _fixture_seed_hex(kid: str) -> str:
+    import hashlib
+
+    from signing_helpers import SEED_DOMAIN
+
+    return hashlib.sha256((SEED_DOMAIN + kid).encode("utf-8")).hexdigest()
+
+
+def test_platform_scope_requires_period_and_signing_env() -> None:
+    base = {
+        "BLUEECONOMY_GOLD_SCOPE": "platform",
+        "BLUEECONOMY_GOLD_SCOPE_ROOT_URI": "/lakehouse/platform",
+        "BLUEECONOMY_GOLD_REPORT": "/evidence/report.json",
+    }
+    with pytest.raises(ValueError, match="BLUEECONOMY_GOLD_STATS_PERIOD must be set"):
+        load_config(base)
+    with pytest.raises(ValueError, match="YYYY-MM"):
+        load_config({**base, "BLUEECONOMY_GOLD_STATS_PERIOD": "Sept-2026"})
+    with pytest.raises(ValueError, match="BLUEECONOMY_SIGNING_KEY_SEED"):
+        load_config({**base, "BLUEECONOMY_GOLD_STATS_PERIOD": "2026-09"})
+    with pytest.raises(ValueError, match="BLUEECONOMY_SIGNING_KID"):
+        load_config(
+            {
+                **base,
+                "BLUEECONOMY_GOLD_STATS_PERIOD": "2026-09",
+                "BLUEECONOMY_SIGNING_KEY_SEED": MRV_TEST_SIGNING_SEED,
+            }
+        )
+    config = load_config(
+        {
+            **base,
+            "BLUEECONOMY_GOLD_STATS_PERIOD": "2026-09",
+            "BLUEECONOMY_SIGNING_KEY_SEED": MRV_TEST_SIGNING_SEED,
+            "BLUEECONOMY_SIGNING_KID": MRV_TEST_SIGNING_KID,
+        }
+    )
+    assert config.stats_period == "2026-09"
+
+
+def test_platform_gold_port_statistics_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_port_statistics import period_fixture_events, write_silver
+
+    root = tmp_path / "platform"
+    write_silver(root, period_fixture_events())
+    paths = gold_env(monkeypatch, tmp_path, "platform")
+    monkeypatch.setenv("BLUEECONOMY_GOLD_STATS_PERIOD", "2026-09")
+    monkeypatch.setenv("BLUEECONOMY_SIGNING_KEY_SEED", _fixture_seed_hex(MRV_TEST_SIGNING_KID))
+    monkeypatch.setenv("BLUEECONOMY_SIGNING_KID", MRV_TEST_SIGNING_KID)
+    main()
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    assert report["assembly"] == "platform-gold-port-statistics"
+    assert report["gold_rows"] > 0
+    assert report["stats_report_sha256"] is not None
+
+    # The signed artefact verifies against the fixture key directory.
+    from blueeconomy_data_platform.signature_verification import (
+        EnvelopeSignatureVerifier,
+        load_key_directory,
+    )
+    from signing_helpers import FIXTURE_KEY_DIRECTORY
+
+    runs = DeltaTable(str(root / "platform_gold" / "port_kpi_runs")).to_pyarrow_table().to_pylist()
+    assert len(runs) == 1
+    artefact_path = root / "platform_gold" / "port_kpi_reports" / f"{runs[0]['run_id']}.json"
+    verifier = EnvelopeSignatureVerifier(load_key_directory(FIXTURE_KEY_DIRECTORY))
+    assert verifier.verify(json.loads(artefact_path.read_text(encoding="utf-8"))) == (
+        MRV_TEST_SIGNING_KID
+    )
+
+
+def test_mrv_gold_assembly_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from blueeconomy_data_platform.mrv_gold import mrv_gold_table_uri
+    from blueeconomy_data_platform.scope_medallion import (
+        ScopeKafkaRecordMetadata,
+        append_scope_silver,
+        build_silver_record,
+    )
+
+    writer = SegregatedDeltaWriter(LakehouseScope.MRV, str(tmp_path / "mrv"))
+    event = {
+        "event_id": "evt-ver",
+        "event_type": "mrv.emissions-annual.v1",
+        "producer": "blueeconomy-geo-service",
+        "occurred_at": BASE_TIME,
+        "recorded_at": BASE_TIME,
+        "data_classification": "mrv_confidential",
+        "source_system": "mrv-api",
+        "source_record_reference": "src-1",
+        "correlation_id": None,
+        "payload_json": json.dumps(
+            {
+                "reportId": "rep-1",
+                "imoNumber": "9081716",
+                "calendarYear": 2026,
+                "state": "VERIFIED",
+                "totals": {"co2Tonnes": 1284.375},
+            }
+        ),
+        "ingested_at": BASE_TIME,
+    }
+    append_scope_silver(
+        writer,
+        [
+            build_silver_record(
+                event, ScopeKafkaRecordMetadata(LakehouseScope.MRV, "mrv.annual-reports", 0, 0)
+            )
+        ],
+    )
+    paths = gold_env(monkeypatch, tmp_path, "mrv")
+    main()
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    assert report["assembly"] == "mrv-gold-vessel-annual"
+    assert report["gold_rows"] == 1
+    assert DeltaTable(mrv_gold_table_uri(writer)).to_pyarrow_table().num_rows == 1
+
+
+def test_bluecarbon_gold_assembly_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from blueeconomy_data_platform.bluecarbon_gold import bluecarbon_gold_table_uri
+    from blueeconomy_data_platform.scope_medallion import (
+        ScopeKafkaRecordMetadata,
+        append_scope_silver,
+        build_silver_record,
+    )
+
+    writer = SegregatedDeltaWriter(LakehouseScope.BLUECARBON, str(tmp_path / "bluecarbon"))
+    event = {
+        "event_id": "evt-p1",
+        "event_type": "bluecarbon.project.v1",
+        "producer": "financial-controls",
+        "occurred_at": BASE_TIME,
+        "recorded_at": BASE_TIME,
+        "data_classification": "bluecarbon_internal",
+        "source_system": "bluecarbon-api",
+        "source_record_reference": "src-1",
+        "correlation_id": None,
+        "payload_json": json.dumps(
+            {"projectId": "NG-BC-2026-0001", "state": "REGISTERED", "methodology": "VM0033 v2.1"}
+        ),
+        "ingested_at": BASE_TIME,
+    }
+    append_scope_silver(
+        writer,
+        [
+            build_silver_record(
+                event,
+                ScopeKafkaRecordMetadata(LakehouseScope.BLUECARBON, "bluecarbon.projects", 0, 0),
+            )
+        ],
+    )
+    paths = gold_env(monkeypatch, tmp_path, "bluecarbon")
+    main()
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    assert report["assembly"] == "bluecarbon-gold-public-registry"
+    assert report["gold_rows"] == 1
+    assert DeltaTable(bluecarbon_gold_table_uri(writer)).to_pyarrow_table().num_rows == 1
