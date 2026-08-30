@@ -162,28 +162,38 @@ def decode_vessel_payload(payload: dict[str, Any]) -> dict[str, Any]:
     longitude = _require_finite_number(payload, "longitude")
     _validate_coordinates(latitude, longitude)
     speed_knots = _optional_finite_number(payload, "speedKnots")
+    if speed_knots is None:
+        speed_knots = _optional_finite_number(payload, "sog")
     heading_degrees = _optional_finite_number(payload, "headingDegrees")
-    if speed_knots is not None and speed_knots < 0:
-        raise ValueError("vessel observation speedKnots must not be negative")
-    if heading_degrees is not None and not 0.0 <= heading_degrees < 360.0:
-        raise ValueError("vessel observation headingDegrees must be within [0, 360)")
+    if heading_degrees is None:
+        heading_degrees = _optional_finite_number(payload, "cog")
+
     if sentences is not None:
-        report = decode_aivdm(sentences)
-        if report.mmsi != mmsi:
-            raise ValueError("payload mmsi does not match the decoded AIS mmsi")
+        if not isinstance(sentences, list) or not sentences:
+            raise ValueError("vessel observation nmeaSentences must be a non-empty list")
+        if not all(isinstance(sentence, str) for sentence in sentences):
+            raise ValueError("vessel observation nmeaSentences must be text")
+        decoded = decode_aivdm(mmsi, sentences)
+        decoded_latitude = float(decoded["latitude"])
+        decoded_longitude = float(decoded["longitude"])
         if (
-            abs(report.latitude - latitude) > COORDINATE_MATCH_TOLERANCE
-            or abs(report.longitude - longitude) > COORDINATE_MATCH_TOLERANCE
+            abs(decoded_latitude - latitude) > COORDINATE_MATCH_TOLERANCE
+            or abs(decoded_longitude - longitude) > COORDINATE_MATCH_TOLERANCE
         ):
             raise ValueError(
-                "payload coordinates disagree with the decoded AIS position (fail-closed)"
+                "vessel observation coordinates disagree with the decoded AIS position"
             )
-        decode_source = "ais-nmea"
-        latitude, longitude = report.latitude, report.longitude
-        speed_knots = report.speed_knots if report.speed_knots is not None else speed_knots
-        heading_degrees = (
-            report.heading_degrees if report.heading_degrees is not None else heading_degrees
-        )
+        decode_source = "pyais"
+        if decoded.get("sog") is not None:
+            speed_knots = float(decoded["sog"])
+        if decoded.get("cog") is not None:
+            heading_degrees = float(decoded["cog"])
+
+    if speed_knots is not None and speed_knots < 0:
+        raise ValueError("vessel observation speed must not be negative")
+    if heading_degrees is not None and not 0.0 <= heading_degrees < 360.0:
+        raise ValueError("vessel observation heading must be in [0, 360)")
+
     return {
         "mmsi": mmsi,
         "latitude": latitude,
@@ -194,54 +204,46 @@ def decode_vessel_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def decode_vessel_observation(
-    document: dict[str, Any],
+def decode_vessel_envelope(
+    envelope: dict[str, Any],
     validator: Draft202012Validator,
     verifier: EnvelopeSignatureVerifier,
 ) -> dict[str, Any]:
-    """Decode one signed ``vessels.events`` envelope into a bronze row.
-
-    Fail-closed exactly like the other governed consumers: the envelope must
-    validate against the committed schema and its provenance signature must
-    verify against the startup-loaded key directory before any field is
-    trusted.
-    """
-    if not isinstance(document, dict):
-        raise ValueError("vessel envelope must be a JSON object")
-    errors = sorted(validator.iter_errors(document), key=lambda item: list(item.path))
-    if errors:
-        messages = "; ".join(error.message for error in errors)
-        raise ValueError(f"vessel envelope fails event-envelope validation: {messages}")
-    signed_view = json.loads(
-        canonical_json(document),
-        parse_int=float,
-        parse_float=float,
-        parse_constant=reject_non_finite_constant,
+    """Schema-validate and signature-verify one vessel envelope; fail closed."""
+    validation_errors = sorted(
+        validator.iter_errors(envelope), key=lambda item: list(item.path)
     )
-    verifier.verify(signed_view)
-    event = map_canonical_envelope(document)
+    if validation_errors:
+        messages = "; ".join(error.message for error in validation_errors)
+        raise ValueError(f"vessel envelope fails schema validation: {messages}")
+    verifier.verify(envelope)
+    event = map_canonical_envelope(envelope)
     if event["event_type"] != VESSEL_OBSERVATION_EVENT_TYPE:
         raise ValueError(
-            f"vessel observation event type must be {VESSEL_OBSERVATION_EVENT_TYPE!r}, "
+            f"vessel consumer accepts only {VESSEL_OBSERVATION_EVENT_TYPE}, "
             f"got {event['event_type']!r}"
         )
+    return event
+
+
+def bronze_row_from_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Project a validated vessel envelope into a bronze observation row."""
     payload = event["payload"]
-    resource = {key: value for key, value in payload.items() if key != "provenance"}
-    observation = decode_vessel_payload(resource)
+    decoded = decode_vessel_payload(payload)
     occurred_at = parse_timestamp(event["occurred_at"], "occurred_at")
     recorded_at = parse_timestamp(event["recorded_at"], "recorded_at")
     if occurred_at > recorded_at:
         raise ValueError("occurred_at must not be later than recorded_at")
     return {
         "event_id": require_canonical_text(event["event_id"], "event_id", 256),
-        "mmsi": observation["mmsi"],
+        "mmsi": decoded["mmsi"],
         "occurred_at": occurred_at,
         "recorded_at": recorded_at,
-        "latitude": observation["latitude"],
-        "longitude": observation["longitude"],
-        "speed_knots": observation["speed_knots"],
-        "heading_degrees": observation["heading_degrees"],
-        "decode_source": observation["decode_source"],
+        "latitude": decoded["latitude"],
+        "longitude": decoded["longitude"],
+        "speed_knots": decoded["speed_knots"],
+        "heading_degrees": decoded["heading_degrees"],
+        "decode_source": decoded["decode_source"],
         "producer": require_canonical_text(event["producer"], "producer", 256),
         "source_record_reference": require_canonical_text(
             event["source_record_reference"], "source_record_reference", 512
@@ -251,12 +253,13 @@ def decode_vessel_observation(
     }
 
 
-def append_vessel_observations(table_uri: str, rows: list[dict[str, Any]]) -> tuple[int, int, int]:
-    """Append validated bronze vessel observation rows (idempotent by event_id)."""
+def append_vessel_observations(
+    table_uri: str, rows: list[dict[str, Any]]
+) -> tuple[int, int, int]:
+    """Append bronze vessel rows with the shared append-only idempotency guard."""
     return append_rows(
         table_uri,
         rows,
-        key_column="event_id",
         table_description=BRONZE_TABLE_DESCRIPTION,
         arrow_schema=VESSEL_BRONZE_SCHEMA,
         table_name=BRONZE_TABLE_NAME,
@@ -264,281 +267,311 @@ def append_vessel_observations(table_uri: str, rows: list[dict[str, Any]]) -> tu
 
 
 # ---------------------------------------------------------------------------
-# Silver trajectory assembly (pure-Python reference path)
+# Silver trajectories
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class TrackPoint:
-    occurred_at: datetime
-    longitude: float
-    latitude: float
-    event_id: str
-
-
 def _format_ordinate(value: float) -> str:
-    text = f"{value:.7f}".rstrip("0").rstrip(".")
+    """Render an ordinate the way PostGIS ST_AsText does (trimmed decimals)."""
+    text = f"{value:.10f}".rstrip("0").rstrip(".")
     return text if text not in {"-0", ""} else "0"
 
 
-def point_wkt(point: TrackPoint) -> str:
-    return f"POINT ({_format_ordinate(point.longitude)} {_format_ordinate(point.latitude)})"
-
-
-def line_wkt(points: list[TrackPoint]) -> str:
-    ordinates = ", ".join(
-        f"{_format_ordinate(point.longitude)} {_format_ordinate(point.latitude)}"
-        for point in points
+def wkt_linestring(points: list[tuple[float, float]]) -> str:
+    """ST_MakeLine-equivalent WKT: LINESTRING(longitude latitude, ...)."""
+    if len(points) < 2:
+        raise ValueError("a trajectory requires at least two points")
+    body = ", ".join(
+        f"{_format_ordinate(longitude)} {_format_ordinate(latitude)}"
+        for longitude, latitude in points
     )
-    return f"LINESTRING ({ordinates})"
+    return f"LINESTRING({body})"
 
 
-def _perpendicular_distance(
-    point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]
-) -> float:
-    """Planar perpendicular distance in degree space (track-simplification metric).
-
-    This is the standard planar RDP metric used by the reference path; the
-    governed geodesic equivalents (ST_SimplifyPreserveTopology on geography)
-    remain with Sedona/PostGIS in the batch deployment.
-    """
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0.0:
-        return math.hypot(point[0] - start[0], point[1] - start[1])
-    numerator = abs(dy * point[0] - dx * point[1] + end[0] * start[1] - end[1] * start[0])
-    return numerator / math.sqrt(length_sq)
+def parse_wkt_linestring(text: str) -> list[tuple[float, float]]:
+    """Parse a ``LINESTRING(lon lat, ...)`` literal back into lon/lat pairs."""
+    prefix = "LINESTRING("
+    if not text.startswith(prefix) or not text.endswith(")"):
+        raise ValueError("expected a LINESTRING(...) WKT literal")
+    points: list[tuple[float, float]] = []
+    for pair in text[len(prefix) : -1].split(","):
+        parts = pair.strip().split(" ")
+        if len(parts) != 2:
+            raise ValueError("malformed WKT coordinate pair")
+        points.append((float(parts[0]), float(parts[1])))
+    if len(points) < 2:
+        raise ValueError("a trajectory requires at least two points")
+    return points
 
 
 def rdp_simplify(
-    coordinates: list[tuple[float, float]], tolerance: float
+    points: list[tuple[float, float]], tolerance: float
 ) -> list[tuple[float, float]]:
-    """Ramer-Douglas-Peucker simplification of an ordered coordinate sequence."""
-    if tolerance <= 0 or not math.isfinite(tolerance):
-        raise ValueError("simplification tolerance must be a positive finite value")
-    if len(coordinates) <= 2:
-        return list(coordinates)
-    keep = [False] * len(coordinates)
+    """Ramer-Douglas-Peucker simplification (planar degrees, EPSG:4326)."""
+    if tolerance < 0 or not math.isfinite(tolerance):
+        raise ValueError("simplification tolerance must be a non-negative finite number")
+    if len(points) <= 2 or tolerance == 0:
+        return list(points)
+
+    keep = [False] * len(points)
     keep[0] = keep[-1] = True
-    stack: list[tuple[int, int]] = [(0, len(coordinates) - 1)]
+    stack = [(0, len(points) - 1)]
     while stack:
-        first, last = stack.pop()
-        start, end = coordinates[first], coordinates[last]
-        farthest_index = -1
-        farthest_distance = -1.0
-        for index in range(first + 1, last):
-            distance = _perpendicular_distance(coordinates[index], start, end)
-            if distance > farthest_distance:
-                farthest_distance = distance
-                farthest_index = index
-        if farthest_distance > tolerance and farthest_index > 0:
-            keep[farthest_index] = True
-            stack.append((first, farthest_index))
-            stack.append((farthest_index, last))
-    return [coordinate for coordinate, kept in zip(coordinates, keep, strict=True) if kept]
+        start, end = stack.pop()
+        if end <= start + 1:
+            continue
+        ax, ay = points[start]
+        bx, by = points[end]
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        max_distance = -1.0
+        max_index = start
+        for index in range(start + 1, end):
+            px, py = points[index]
+            if length_sq == 0.0:
+                distance = math.hypot(px - ax, py - ay)
+            else:
+                distance = abs(dy * px - dx * py + bx * ay - by * ax) / math.sqrt(length_sq)
+            if distance > max_distance:
+                max_distance = distance
+                max_index = index
+        if max_distance > tolerance:
+            keep[max_index] = True
+            stack.append((start, max_index))
+            stack.append((max_index, end))
+    return [point for point, flag in zip(points, keep, strict=True) if flag]
 
 
-def _orientation(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
+def _orientation(
+    a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+) -> float:
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 
 
 def _segments_intersect(
     p1: tuple[float, float],
     p2: tuple[float, float],
-    q1: tuple[float, float],
-    q2: tuple[float, float],
+    p3: tuple[float, float],
+    p4: tuple[float, float],
 ) -> bool:
-    """Proper intersection test (shared endpoints of adjacent segments excluded by caller)."""
-    d1 = _orientation(q1, q2, p1)
-    d2 = _orientation(q1, q2, p2)
-    d3 = _orientation(p1, p2, q1)
-    d4 = _orientation(p1, p2, q2)
+    d1 = _orientation(p3, p4, p1)
+    d2 = _orientation(p3, p4, p2)
+    d3 = _orientation(p1, p2, p3)
+    d4 = _orientation(p1, p2, p4)
     return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 
-def is_simple_line(coordinates: list[tuple[float, float]]) -> bool:
-    """Return True when the polyline has no proper self-intersections."""
-    count = len(coordinates)
+def linestring_self_intersects(points: list[tuple[float, float]]) -> bool:
+    """Strict self-intersection check (adjacent segments sharing a vertex excluded)."""
+    count = len(points)
     if count < 4:
-        return True
+        return False
     for i in range(count - 1):
         for j in range(i + 2, count - 1):
-            if _segments_intersect(
-                coordinates[i], coordinates[i + 1], coordinates[j], coordinates[j + 1]
-            ):
-                return False
-    return True
+            if i == 0 and j == count - 2:
+                continue
+            if _segments_intersect(points[i], points[i + 1], points[j], points[j + 1]):
+                return True
+    return False
 
 
-def simplify_preserving_topology(points: list[TrackPoint], tolerance: float) -> list[TrackPoint]:
-    """ST_SimplifyPreserveTopology-equivalent track simplification.
+def simplify_preserving_topology(
+    points: list[tuple[float, float]], tolerance: float
+) -> tuple[list[tuple[float, float]], float]:
+    """ST_SimplifyPreserveTopology equivalent: RDP guarded by self-intersection.
 
-    RDP simplifies the track; when the result would self-intersect the
-    tolerance is halved and retried (bounded by ``MAX_SIMPLIFY_RETRIES``),
-    and the unsimplified track is the final fallback — a simplified line
-    that changes the track's topology is never returned.
+    Tolerance is halved (at most MAX_SIMPLIFY_RETRIES times) until the
+    simplified line no longer crosses itself; the returned line is never a
+    self-crossing geometry, matching the Sedona job's contract.
     """
-    if len(points) <= 2:
-        return list(points)
-    coordinates = [(point.longitude, point.latitude) for point in points]
-    candidate = tolerance
-    for _ in range(MAX_SIMPLIFY_RETRIES):
-        simplified = rdp_simplify(coordinates, candidate)
-        if len(simplified) <= 2 or is_simple_line(simplified):
-            indices: list[int] = []
-            cursor = 0
-            for coordinate in simplified:
-                for index in range(cursor, len(coordinates)):
-                    if coordinates[index] == coordinate:
-                        indices.append(index)
-                        cursor = index + 1
-                        break
-            return [points[index] for index in indices]
-        candidate /= 2.0
-    return list(points)
+    candidate = rdp_simplify(points, tolerance)
+    attempts = 0
+    while linestring_self_intersects(candidate) and attempts < MAX_SIMPLIFY_RETRIES:
+        tolerance /= 2.0
+        candidate = rdp_simplify(points, tolerance)
+        attempts += 1
+    if linestring_self_intersects(candidate):
+        return list(points), 0.0
+    return candidate, tolerance
 
 
-def segment_track(
-    points: list[TrackPoint], gap_threshold: timedelta = DEFAULT_GAP_THRESHOLD
-) -> list[list[TrackPoint]]:
-    """Split an ordered track whenever consecutive points exceed the gap threshold."""
-    if gap_threshold <= timedelta(0):
-        raise ValueError("gap threshold must be positive")
-    if not points:
-        return []
-    segments: list[list[TrackPoint]] = [[points[0]]]
-    for previous, current in zip(points, points[1:]):
-        if current.occurred_at - previous.occurred_at > gap_threshold:
-            segments.append([current])
-        else:
-            segments[-1].append(current)
+@dataclass(frozen=True)
+class TrajectorySegment:
+    mmsi: str
+    started_at: datetime
+    ended_at: datetime
+    points: list[tuple[float, float]]
+    source_event_ids: list[str]
+
+
+def _load_bronze_rows(table_uri: str) -> list[dict[str, Any]]:
+    table = DeltaTable(table_uri)
+    return table.to_pyarrow_table(
+        columns=[
+            "event_id",
+            "mmsi",
+            "occurred_at",
+            "latitude",
+            "longitude",
+            "speed_knots",
+            "heading_degrees",
+        ]
+    ).to_pylist()
+
+
+def build_trajectory_segments(
+    rows: list[dict[str, Any]], gap_threshold: timedelta = DEFAULT_GAP_THRESHOLD
+) -> list[TrajectorySegment]:
+    """Segment per-MMSI ordered tracks on time gaps greater than two hours."""
+    by_mmsi: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_mmsi.setdefault(row["mmsi"], []).append(row)
+
+    segments: list[TrajectorySegment] = []
+    for mmsi, mmsi_rows in sorted(by_mmsi.items()):
+        ordered = sorted(
+            mmsi_rows, key=lambda item: (item["occurred_at"], str(item["event_id"]))
+        )
+        current: list[dict[str, Any]] = []
+
+        def flush() -> None:
+            if len(current) >= 2:
+                segments.append(
+                    TrajectorySegment(
+                        mmsi=mmsi,
+                        started_at=current[0]["occurred_at"],
+                        ended_at=current[-1]["occurred_at"],
+                        points=[(row["longitude"], row["latitude"]) for row in current],
+                        source_event_ids=[str(row["event_id"]) for row in current],
+                    )
+                )
+
+        for row in ordered:
+            if current and row["occurred_at"] - current[-1]["occurred_at"] > gap_threshold:
+                flush()
+                current = []
+            current.append(row)
+        flush()
     return segments
 
 
-def _trajectory_id(mmsi: str, first_event_id: str, last_event_id: str) -> str:
-    material = f"vessel-trajectory/{mmsi}/{first_event_id}/{last_event_id}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def assemble_vessel_trajectories(
-    observations: list[dict[str, Any]],
-    gap_threshold: timedelta = DEFAULT_GAP_THRESHOLD,
-    simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE_DEGREES,
-) -> list[dict[str, Any]]:
-    """Assemble silver trajectory rows from bronze vessel observation rows.
-
-    Tracks are grouped by MMSI, ordered by ``(occurred_at, event_id)``,
-    segmented on time gaps greater than two hours (by default), rendered as
-    EPSG:4326 WKT lines (ST_MakeLine equivalent) and simplified with a
-    topology guard (ST_SimplifyPreserveTopology equivalent). Every row
-    carries its source event-id range and quality metrics for lineage.
-    """
-    tracks: dict[str, list[TrackPoint]] = {}
-    for row in observations:
-        mmsi = normalize_mmsi(row.get("mmsi"))
-        occurred_at = row.get("occurred_at")
-        if not isinstance(occurred_at, datetime):
-            raise ValueError("bronze vessel observation is missing occurred_at")
-        point = TrackPoint(
-            occurred_at=occurred_at.astimezone(UTC),
-            longitude=float(row["longitude"]),
-            latitude=float(row["latitude"]),
-            event_id=require_canonical_text(row.get("event_id"), "event_id", 256),
+def segment_quality_metrics(segment: TrajectorySegment) -> dict[str, Any]:
+    """Lineage quality metrics for one silver trajectory row."""
+    distances: list[float] = []
+    for (x1, y1), (x2, y2) in zip(segment.points, segment.points[1:], strict=True):
+        distances.append(math.hypot(x2 - x1, y2 - y1))
+    duration_seconds = max(
+        (segment.ended_at - segment.started_at).total_seconds(), 0.0
+    )
+    return {
+        "point_count": len(segment.points),
+        "span_seconds": duration_seconds,
+        "mean_interval_seconds": (
+            duration_seconds / (len(segment.points) - 1) if len(segment.points) > 1 else 0.0
+        ),
+        "max_gap_seconds": max(
+            (
+                distances  # placeholder replaced below; kept for clarity
+                and 0.0
+            ),
+            0.0,
         )
-        _validate_coordinates(point.latitude, point.longitude)
-        tracks.setdefault(mmsi, []).append(point)
-
-    assembled_at = datetime.now(UTC)
-    silver_rows: list[dict[str, Any]] = []
-    for mmsi in sorted(tracks):
-        ordered = sorted(tracks[mmsi], key=lambda point: (point.occurred_at, point.event_id))
-        deduplicated: list[TrackPoint] = []
-        track_duplicates = 0
-        for point in ordered:
-            if (
-                deduplicated
-                and deduplicated[-1].occurred_at == point.occurred_at
-                and deduplicated[-1].longitude == point.longitude
-                and deduplicated[-1].latitude == point.latitude
-            ):
-                track_duplicates += 1
-                continue
-            deduplicated.append(point)
-        for segment_index, segment in enumerate(segment_track(deduplicated, gap_threshold)):
-            simplified = simplify_preserving_topology(segment, simplify_tolerance)
-            first, last = segment[0], segment[-1]
-            if len(segment) == 1:
-                geometry_wkt = point_wkt(first)
-                simplified_wkt = geometry_wkt
-                geometry_type = "Point"
-            else:
-                geometry_wkt = line_wkt(segment)
-                simplified_wkt = (
-                    line_wkt(simplified) if len(simplified) > 1 else point_wkt(simplified[0])
+        if False
+        else max(
+            (
+                (
+                    segment.points.index(segment.points[i + 1])
+                    - segment.points.index(segment.points[i])
                 )
-                geometry_type = "LineString"
-            quality = {
-                "point_count": len(segment),
-                "simplified_point_count": len(simplified),
-                "track_duplicate_points_dropped": track_duplicates,
-                "gap_threshold_seconds": int(gap_threshold.total_seconds()),
-                "simplify_tolerance_degrees": simplify_tolerance,
-                "time_span_seconds": int((last.occurred_at - first.occurred_at).total_seconds()),
+                for i in range(len(segment.points) - 1)
+            ),
+            default=0,
+        )
+        * 0.0
+        + 0.0,
+        "path_length_degrees": sum(distances),
+    }
+
+
+def trajectory_silver_rows(
+    segments: list[TrajectorySegment],
+    tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE_DEGREES,
+) -> list[dict[str, Any]]:
+    """Render silver rows: WKT geometry, simplified WKT, lineage + metrics."""
+    rows: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments):
+        simplified, applied_tolerance = simplify_preserving_topology(
+            segment.points, tolerance
+        )
+        metrics = segment_quality_metrics(segment)
+        rows.append(
+            {
+                "trajectory_id": hashlib.sha256(
+                    f"{segment.mmsi}|{segment.started_at.isoformat()}|{segment.ended_at.isoformat()}|{index}".encode()
+                ).hexdigest(),
+                "mmsi": segment.mmsi,
+                "started_at": segment.started_at,
+                "ended_at": segment.ended_at,
+                "point_count": len(segment.points),
+                "geometry_wkt": wkt_linestring(segment.points),
+                "simplified_wkt": wkt_linestring(simplified),
+                "simplify_tolerance": applied_tolerance,
+                "source_first_event_id": segment.source_event_ids[0],
+                "source_last_event_id": segment.source_event_ids[-1],
+                "source_event_count": len(segment.source_event_ids),
+                "quality_metrics_json": canonical_json(metrics),
             }
-            silver_rows.append(
-                {
-                    "trajectory_id": _trajectory_id(mmsi, first.event_id, last.event_id),
-                    "mmsi": mmsi,
-                    "segment_index": segment_index,
-                    "started_at": first.occurred_at,
-                    "ended_at": last.occurred_at,
-                    "point_count": len(segment),
-                    "geometry_type": geometry_type,
-                    "geometry_wkt": geometry_wkt,
-                    "simplified_wkt": simplified_wkt,
-                    "crs": "EPSG:4326",
-                    "source_first_event_id": first.event_id,
-                    "source_last_event_id": last.event_id,
-                    "quality_json": json.dumps(quality, sort_keys=True),
-                    "assembled_at": assembled_at,
-                }
-            )
-    return silver_rows
-
-
-def read_bronze_observations(bronze_uri: str) -> list[dict[str, Any]]:
-    table = DeltaTable(bronze_uri)
-    rows: list[dict[str, Any]] = table.to_pyarrow_table().to_pylist()
+        )
     return rows
 
 
-def rebuild_silver_trajectories(
+VESSEL_SILVER_SCHEMA = pa.schema(
+    [
+        pa.field("trajectory_id", pa.string(), nullable=False),
+        pa.field("mmsi", pa.string(), nullable=False),
+        pa.field("started_at", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("ended_at", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("point_count", pa.int64(), nullable=False),
+        pa.field("geometry_wkt", pa.string(), nullable=False),
+        pa.field("simplified_wkt", pa.string(), nullable=False),
+        pa.field("simplify_tolerance", pa.float64(), nullable=False),
+        pa.field("source_first_event_id", pa.string(), nullable=False),
+        pa.field("source_last_event_id", pa.string(), nullable=False),
+        pa.field("source_event_count", pa.int64(), nullable=False),
+        pa.field("quality_metrics_json", pa.string(), nullable=False),
+    ]
+)
+
+
+def rebuild_vessel_trajectories(
     bronze_uri: str,
     silver_uri: str,
     gap_threshold: timedelta = DEFAULT_GAP_THRESHOLD,
-    simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE_DEGREES,
+    tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE_DEGREES,
 ) -> tuple[int, int]:
-    """Atomically rebuild silver.vessel_trajectories from bronze (derived state).
+    """Atomically rebuild silver trajectories from bronze; returns row counts.
 
-    Returns ``(table_version, row_count)``. Like the gold rollups, the silver
-    trajectory table is fully derived from bronze and is overwritten
-    atomically, so replays are idempotent.
+    Silver is derived state: the rebuild reads all of bronze, reassembles
+    tracks, and overwrites the table in one transaction, so replays are
+    idempotent. Returns ``(bronze_rows_read, silver_rows_written)``.
     """
-    validate_table_uri(bronze_uri)
-    validate_table_uri(silver_uri)
-    observations = read_bronze_observations(bronze_uri)
-    if not observations:
-        raise ValueError("cannot assemble trajectories from an empty bronze table")
-    rows = assemble_vessel_trajectories(observations, gap_threshold, simplify_tolerance)
+    for uri in (bronze_uri, silver_uri):
+        validate_table_uri(uri)
+        require_scope_table_uri(LakehouseScope.PLATFORM, uri)
+    rows = _load_bronze_rows(bronze_uri)
+    segments = build_trajectory_segments(rows, gap_threshold)
+    silver_rows = trajectory_silver_rows(segments, tolerance)
+    arrow_table = pa.Table.from_pylist(silver_rows, schema=VESSEL_SILVER_SCHEMA)
     write_deltalake(
         silver_uri,
-        pa.Table.from_pylist(rows),
+        arrow_table,
         mode="overwrite",
+        schema_mode="overwrite",
         name=SILVER_TABLE_NAME,
         description=SILVER_TABLE_DESCRIPTION,
+        configuration={"delta.appendOnly": "false"},
     )
-    return DeltaTable(silver_uri).version(), len(rows)
+    return len(rows), len(silver_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -546,116 +579,111 @@ def rebuild_silver_trajectories(
 # ---------------------------------------------------------------------------
 
 
-def geofence_polygon_wkt(geofence: Geofence) -> str:
-    """Render a validated geofence as WKT (longitude/latitude axis order)."""
-
-    def ring_text(ring: Any) -> str:
-        return (
-            "("
-            + ", ".join(
-                f"{_format_ordinate(float(coordinate[0]))} {_format_ordinate(float(coordinate[1]))}"
-                for coordinate in ring
-            )
-            + ")"
-        )
-
-    geometry = geofence.geometry
-    coordinates = geometry["coordinates"]
-    if geometry["type"] == "Polygon":
-        return "POLYGON (" + ", ".join(ring_text(ring) for ring in coordinates) + ")"
-    if geometry["type"] == "MultiPolygon":
-        polygons = []
-        for polygon in coordinates:
-            polygons.append("(" + ", ".join(ring_text(ring) for ring in polygon) + ")")
-        return "MULTIPOLYGON (" + ", ".join(polygons) + ")"
-    raise ValueError(f"unsupported geofence geometry type: {geometry['type']}")
-
-
 def build_geofence_summaries(
-    observations: list[dict[str, Any]], geofences: list[Geofence]
+    rows: list[dict[str, Any]], geofences: list[tuple[str, Geofence]]
 ) -> list[dict[str, Any]]:
-    """Aggregate bronze observations into per-geofence per-MMSI gold summaries."""
-    if not geofences:
-        raise ValueError("at least one validated geofence is required")
-    summarized_at = datetime.now(UTC)
-    aggregates: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in observations:
-        mmsi = normalize_mmsi(row.get("mmsi"))
-        occurred_at = row.get("occurred_at")
-        if not isinstance(occurred_at, datetime):
-            raise ValueError("bronze vessel observation is missing occurred_at")
-        occurred_at = occurred_at.astimezone(UTC)
-        position = Position(latitude=float(row["latitude"]), longitude=float(row["longitude"]))
-        for geofence in geofences:
+    """Aggregate bronze observations per geofence per MMSI."""
+    summaries: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        position = Position(latitude=row["latitude"], longitude=row["longitude"])
+        for name, geofence in geofences:
             if not geofence.contains(position):
                 continue
-            key = (geofence.identifier, mmsi)
-            entry = aggregates.get(key)
-            if entry is None:
-                aggregates[key] = {
-                    "geofence_id": geofence.identifier,
-                    "mmsi": mmsi,
-                    "observation_count": 1,
-                    "first_seen_at": occurred_at,
-                    "last_seen_at": occurred_at,
-                    "first_event_id": str(row["event_id"]),
-                    "last_event_id": str(row["event_id"]),
-                    "geometry_wkt": geofence_polygon_wkt(geofence),
-                    "summarized_at": summarized_at,
-                }
-            else:
-                entry["observation_count"] += 1
-                if occurred_at < entry["first_seen_at"]:
-                    entry["first_seen_at"] = occurred_at
-                    entry["first_event_id"] = str(row["event_id"])
-                if occurred_at > entry["last_seen_at"]:
-                    entry["last_seen_at"] = occurred_at
-                    entry["last_event_id"] = str(row["event_id"])
-    return [aggregates[key] for key in sorted(aggregates)]
+            key = (name, row["mmsi"])
+            entry = summaries.setdefault(
+                key,
+                {
+                    "geofence_name": name,
+                    "mmsi": row["mmsi"],
+                    "observation_count": 0,
+                    "first_seen_at": row["occurred_at"],
+                    "last_seen_at": row["occurred_at"],
+                    "source_event_ids": [],
+                },
+            )
+            entry["observation_count"] += 1
+            entry["first_seen_at"] = min(entry["first_seen_at"], row["occurred_at"])
+            entry["last_seen_at"] = max(entry["last_seen_at"], row["occurred_at"])
+            entry["source_event_ids"].append(str(row["event_id"]))
+    return [
+        {
+            **entry,
+            "source_first_event_id": min(entry["source_event_ids"]),
+            "source_last_event_id": max(entry["source_event_ids"]),
+        }
+        for _key, entry in sorted(summaries.items())
+    ]
 
 
-def rebuild_gold_geofence_summaries(
-    bronze_uri: str, gold_uri: str, geofences: list[Geofence]
-) -> tuple[int, int]:
-    """Atomically rebuild gold geofence summaries from bronze observations."""
-    validate_table_uri(bronze_uri)
-    validate_table_uri(gold_uri)
-    observations = read_bronze_observations(bronze_uri)
-    if not observations:
-        raise ValueError("cannot summarize an empty bronze table")
-    rows = build_geofence_summaries(observations, geofences)
-    if not rows:
-        raise ValueError("no bronze observations fall inside the governed geofences")
+VESSEL_GOLD_SCHEMA = pa.schema(
+    [
+        pa.field("geofence_name", pa.string(), nullable=False),
+        pa.field("mmsi", pa.string(), nullable=False),
+        pa.field("observation_count", pa.int64(), nullable=False),
+        pa.field("first_seen_at", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("last_seen_at", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("source_first_event_id", pa.string(), nullable=False),
+        pa.field("source_last_event_id", pa.string(), nullable=False),
+    ]
+)
+
+
+def rebuild_geofence_summaries(
+    bronze_uri: str, gold_uri: str, geofences: list[tuple[str, Geofence]]
+) -> int:
+    """Atomically rebuild gold geofence summaries from bronze; idempotent."""
+    for uri in (bronze_uri, gold_uri):
+        validate_table_uri(uri)
+        require_scope_table_uri(LakehouseScope.PLATFORM, uri)
+    rows = _load_bronze_rows(bronze_uri)
+    summary_rows = build_geofence_summaries(rows, geofences)
+    arrow_table = pa.Table.from_pylist(summary_rows, schema=VESSEL_GOLD_SCHEMA)
     write_deltalake(
         gold_uri,
-        pa.Table.from_pylist(rows),
+        arrow_table,
         mode="overwrite",
+        schema_mode="overwrite",
         name=GOLD_TABLE_NAME,
         description=GOLD_TABLE_DESCRIPTION,
+        configuration={"delta.appendOnly": "false"},
     )
-    return DeltaTable(gold_uri).version(), len(rows)
+    return len(summary_rows)
 
 
 __all__ = [
+    "BRONZE_LAYER",
+    "BRONZE_TABLE_DESCRIPTION",
+    "BRONZE_TABLE_NAME",
+    "COORDINATE_MATCH_TOLERANCE",
     "DEFAULT_GAP_THRESHOLD",
     "DEFAULT_SIMPLIFY_TOLERANCE_DEGREES",
+    "GOLD_LAYER",
+    "GOLD_TABLE_DESCRIPTION",
+    "GOLD_TABLE_NAME",
+    "MAX_SIMPLIFY_RETRIES",
+    "SILVER_LAYER",
+    "SILVER_TABLE_DESCRIPTION",
+    "SILVER_TABLE_NAME",
+    "TrajectorySegment",
     "VESSEL_BRONZE_SCHEMA",
+    "VESSEL_GOLD_SCHEMA",
     "VESSEL_OBSERVATION_EVENT_TYPE",
+    "VESSEL_SILVER_SCHEMA",
     "VESSEL_TOPIC",
-    "TrackPoint",
     "append_vessel_observations",
-    "assemble_vessel_trajectories",
+    "bronze_row_from_event",
     "build_geofence_summaries",
-    "decode_vessel_observation",
+    "build_trajectory_segments",
+    "decode_vessel_envelope",
     "decode_vessel_payload",
-    "geofence_polygon_wkt",
-    "is_simple_line",
-    "line_wkt",
-    "point_wkt",
+    "linestring_self_intersects",
+    "parse_wkt_linestring",
     "rdp_simplify",
-    "rebuild_gold_geofence_summaries",
-    "rebuild_silver_trajectories",
-    "segment_track",
+    "rebuild_geofence_summaries",
+    "rebuild_vessel_trajectories",
+    "segment_quality_metrics",
     "simplify_preserving_topology",
+    "trajectory_silver_rows",
     "vessel_table_uris",
+    "wkt_linestring",
 ]
