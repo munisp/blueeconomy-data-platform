@@ -1,0 +1,35 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "b2e5f708-1a3c-4d6e-8f90-a2b4c6d8e0f1",
+  "eventType": "export.consignment.created.v1",
+  "occurredAt": "2026-08-12T12:10:00Z",
+  "producer": "fisheries-traceability",
+  "correlationId": "b2e5f708-1a3c-4d6e-8f90-a2b4c6d8e0f1",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Basic",
+          "internalEventType": "export.consignment.created",
+          "subjectId": "CONS-2026-0001",
+          "consignmentId": "CONS-2026-0001",
+          "speciesCode": "TUNA-YFT",
+          "catchWeightKg": 125.5,
+          "exportReference": "EXP-8899",
+          "principal_id": "svc-fisheries-traceability",
+          "principal_role": "fisheries-operations",
+          "bundle_hash_sha256": "e6f708192a3b4c5d6e7f8091a2b3c4d59d1c7f2ab34e56c8901de4f6a2b3c4d5"
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-fisheries-traceability",
+    "principalRole": "fisheries-operations",
+    "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImZpc2hlcmllcy10cmFjZWFiaWxpdHktMCJ9.eyJjbGFzc2lmaWNhdGlvbiI6IkNPTkZJREVOVElBTCIsImNvcnJlbGF0aW9uSWQiOiJiMmU1ZjcwOC0xYTNjLTRkNmUtOGY5MC1hMmI0YzZkOGUwZjEiLCJlbnZlbG9wZVZlcnNpb24iOiIxLjAiLCJldmVudElkIjoiYjJlNWY3MDgtMWEzYy00ZDZlLThmOTAtYTJiNGM2ZDhlMGYxIiwiZXZlbnRUeXBlIjoiZXhwb3J0LmNvbnNpZ25tZW50LmNyZWF0ZWQudjEiLCJmaGlyIjp7ImVudHJ5IjpbeyJyZXNvdXJjZSI6eyJidW5kbGVfaGFzaF9zaGEyNTYiOiJlNmY3MDgxOTJhM2I0YzVkNmU3ZjgwOTFhMmIzYzRkNTlkMWM3ZjJhYjM0ZTU2Yzg5MDFkZTRmNmEyYjNjNGQ1IiwiY2F0Y2hXZWlnaHRLZyI6MTI1LjUsImNvbnNpZ25tZW50SWQiOiJDT05TLTIwMjYtMDAwMSIsImV4cG9ydFJlZmVyZW5jZSI6IkVYUC04ODk5IiwiaW50ZXJuYWxFdmVudFR5cGUiOiJleHBvcnQuY29uc2lnbm1lbnQuY3JlYXRlZCIsInByaW5jaXBhbF9pZCI6InN2Yy1maXNoZXJpZXMtdHJhY2VhYmlsaXR5IiwicHJpbmNpcGFsX3JvbGUiOiJmaXNoZXJpZXMtb3BlcmF0aW9ucyIsInJlc291cmNlVHlwZSI6IkJhc2ljIiwic3BlY2llc0NvZGUiOiJUVU5BLVlGVCIsInN1YmplY3RJZCI6IkNPTlMtMjAyNi0wMDAxIn19XSwicmVzb3VyY2VUeXBlIjoiQnVuZGxlIiwidHlwZSI6Im1lc3NhZ2UifSwib2NjdXJyZWRBdCI6IjIwMjYtMDgtMTJUMTI6MTA6MDBaIiwicHJvZHVjZXIiOiJmaXNoZXJpZXMtdHJhY2VhYmlsaXR5IiwicHJvdmVuYW5jZSI6eyJsZWRnZXJDb21taXRIYXNoIjoiZTZmNzA4MTkyYTNiNGM1ZDZlN2Y4MDkxYTJiM2M0ZDU5ZDFjN2YyYWIzNGU1NmM4OTAxZGU0ZjZhMmIzYzRkNSIsInByaW5jaXBhbElkIjoic3ZjLWZpc2hlcmllcy10cmFjZWFiaWxpdHkiLCJwcmluY2lwYWxSb2xlIjoiZmlzaGVyaWVzLW9wZXJhdGlvbnMifX0.wy8JKRxk5fF176tTXlPhaTVimXo2fpE4LhMa29dBUEh-7BmcqqTkOXSSmQVuk-mXdUf0GK65-A03hwmoQxEoCQ",
+    "ledgerCommitHash": "e6f708192a3b4c5d6e7f8091a2b3c4d59d1c7f2ab34e56c8901de4f6a2b3c4d5"
+  },
+  "classification": "CONFIDENTIAL"
+}

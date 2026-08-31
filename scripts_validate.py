@@ -13,7 +13,7 @@ if not compileall.compile_dir(repository / "src", quiet=1):
     raise SystemExit("Python source compilation failed")
 
 validator = ingest.load_schema(repository / "schemas" / "event-envelope.schema.json")
-if validator.schema.get("title") != "Blue Economy Lakehouse Event Envelope":
+if validator.schema.get("title") != "Blue Economy Platform Event Envelope":
     raise SystemExit("Unexpected event envelope schema title")
 if not validator.schema.get("required"):
     raise SystemExit("Event envelope schema has no required fields")

@@ -24,6 +24,8 @@ from deltalake import DeltaTable, write_deltalake
 from deltalake.exceptions import CommitFailedError, TableNotFoundError
 from jsonschema import Draft202012Validator, FormatChecker
 
+from blueeconomy_data_platform.segregation import map_canonical_classification
+
 MAX_RECORDS_PER_BATCH = 100_000
 MAX_INPUT_BYTES = 256 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024
@@ -123,7 +125,8 @@ def read_and_validate_events(
                 raise ValueError(
                     f"input line {line_number} fails event-envelope validation: {messages}"
                 )
-            event_id = require_canonical_text(event["event_id"], "event_id", 256)
+            event = map_canonical_envelope(event)
+            event_id = event["event_id"]
             if event_id in event_ids:
                 raise ValueError(f"input contains duplicate event_id {event_id!r}")
             event_ids.add(event_id)
@@ -136,6 +139,61 @@ def read_and_validate_events(
     if not events:
         raise ValueError("input contains no event records")
     return events
+
+
+def map_canonical_envelope(document: dict[str, Any]) -> dict[str, Any]:
+    """Project a schema-validated canonical envelope into the internal event shape.
+
+    Producers emit the canonical platform contract (camelCase field names, a
+    FHIR R4 message Bundle, a provenance block and the canonical
+    classification vocabulary). The lakehouse retains the internal snake_case
+    event model: the FHIR message entry's primary resource becomes the
+    retained payload with the provenance block attached, and the canonical
+    classification is mapped to the internal lowercase per-scope label.
+    Anything unexpected fails closed.
+    """
+    event_id = require_canonical_text(document["eventId"], "eventId", 256)
+    event_type = require_canonical_text(document["eventType"], "eventType", 128)
+    producer = require_canonical_text(document["producer"], "producer", 256)
+    bundle = document["fhir"]
+    if not isinstance(bundle, dict):
+        raise ValueError("fhir must be a FHIR R4 message Bundle object")
+    entries = bundle.get("entry")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("fhir bundle must carry at least one message entry")
+    first_entry = entries[0]
+    if not isinstance(first_entry, dict):
+        raise ValueError("fhir bundle entries must be objects")
+    resource = first_entry.get("resource")
+    if not isinstance(resource, dict) or not resource:
+        raise ValueError("fhir message entry resource must be a non-empty object")
+    if "provenance" in resource:
+        raise ValueError("fhir message entry resource must not redefine provenance")
+    provenance = document["provenance"]
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be an object")
+    ledger_commit_hash = require_canonical_text(
+        provenance["ledgerCommitHash"], "provenance.ledgerCommitHash", 512
+    )
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "producer": producer,
+        "occurred_at": document["occurredAt"],
+        # The canonical envelope carries only occurredAt; the lakehouse
+        # records the same instant as the observation time.
+        "recorded_at": document["occurredAt"],
+        "data_classification": map_canonical_classification(document["classification"], event_type),
+        "source_system": producer,
+        "source_record_reference": ledger_commit_hash,
+        "correlation_id": document.get("correlationId"),
+        "payload": {**resource, "provenance": provenance},
+        **(
+            {"record_classification": document["recordClassification"]}
+            if document.get("recordClassification") is not None
+            else {}
+        ),
+    }
 
 
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -155,7 +213,16 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     if correlation_id is not None:
         correlation_id = require_canonical_text(correlation_id, "correlation_id", 256)
 
-    return {
+    record_classification = event.get("record_classification")
+    if record_classification is not None:
+        # Row-level clearance label, persisted as a column; unknown labels fail closed.
+        from blueeconomy_data_platform.access_policy import Clearance
+
+        record_classification = Clearance.from_label(
+            require_canonical_text(record_classification, "record_classification", 32)
+        ).label
+
+    normalized = {
         "event_id": require_canonical_text(event["event_id"], "event_id", 256),
         "event_type": require_canonical_text(event["event_type"], "event_type", 128),
         "producer": require_canonical_text(event["producer"], "producer", 256),
@@ -170,6 +237,9 @@ def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
         "payload_json": payload_json,
         "ingested_at": datetime.now(UTC),
     }
+    if record_classification is not None:
+        normalized["record_classification"] = record_classification
+    return normalized
 
 
 def validate_maritime_position(payload: Any) -> None:
@@ -281,52 +351,128 @@ EVENT_IDENTITY_COLUMNS = (
 )
 
 
+def read_identity_rows(
+    table: DeltaTable,
+    columns: list[str],
+    key_column: str,
+    keys: list[str],
+) -> list[dict[str, Any]]:
+    """Read replay-guard identity rows, tolerant of merge-written files.
+
+    deltalake 1.6.2 with pyarrow 25 raises ``ArrowNotImplementedError`` on
+    filtered ``to_pyarrow_table`` reads of tables containing merge-written
+    files. The replay guards must stay fail-closed regardless of file
+    provenance, so on exactly that failure we fall back to an unfiltered
+    read and filter the rows in Python. Any other error still propagates.
+    """
+    try:
+        filtered: list[dict[str, Any]] = table.to_pyarrow_table(
+            columns=columns,
+            filters=[(key_column, "in", list(keys))],
+        ).to_pylist()
+        return filtered
+    except pa.lib.ArrowNotImplementedError:
+        wanted = {str(key) for key in keys}
+        return [
+            row
+            for row in table.to_pyarrow_table(columns=columns).to_pylist()
+            if str(row[key_column]) in wanted
+        ]
+
+
+# Row attributes excluded from immutable-replay identity comparison: they
+# record processing instants or optional labels, not event content.
+REPLAY_GUARD_EXCLUDED_COLUMNS = frozenset(
+    {"ingested_at", "promoted_at", "record_classification", "executed_at", "computed_at"}
+)
+
+
+def replay_guard_columns(rows: list[dict[str, Any]]) -> list[str]:
+    """Derive the immutable identity columns shared by every row in a batch."""
+    if not rows:
+        raise ValueError("cannot derive replay-guard columns from an empty batch")
+    columns = [column for column in rows[0] if column not in REPLAY_GUARD_EXCLUDED_COLUMNS]
+    for row in rows[1:]:
+        derived = [c for c in row if c not in REPLAY_GUARD_EXCLUDED_COLUMNS]
+        if derived != columns:
+            raise ValueError("batch rows do not share an identical column shape")
+    return columns
+
+
 def reject_conflicting_event_replays(table: DeltaTable, events: list[dict[str, Any]]) -> None:
-    event_ids = [str(event["event_id"]) for event in events]
-    existing_rows = table.to_pyarrow_table(
-        columns=list(EVENT_IDENTITY_COLUMNS),
-        filters=[("event_id", "in", event_ids)],
-    ).to_pylist()
-    existing_by_id = {str(row["event_id"]): row for row in existing_rows}
+    reject_conflicting_replays(table, events, "event_id")
+
+
+def reject_conflicting_replays(
+    table: DeltaTable, rows: list[dict[str, Any]], key_column: str
+) -> None:
+    columns = replay_guard_columns(rows)
+    keys = [str(row[key_column]) for row in rows]
+    existing_rows = read_identity_rows(table, columns, key_column, keys)
+    existing_by_key = {str(row[key_column]): row for row in existing_rows}
     conflicts: list[str] = []
-    for event in events:
-        event_id = str(event["event_id"])
-        existing = existing_by_id.get(event_id)
+    for row in rows:
+        key = str(row[key_column])
+        existing = existing_by_key.get(key)
         if existing is None:
             continue
-        if any(existing[column] != event[column] for column in EVENT_IDENTITY_COLUMNS):
-            conflicts.append(event_id)
+        if any(existing[column] != row[column] for column in columns):
+            conflicts.append(key)
     if conflicts:
         raise ValueError(
-            "event_id reuse conflicts with retained immutable content: "
+            f"{key_column} reuse conflicts with retained immutable content: "
             + ", ".join(sorted(conflicts))
         )
 
 
-def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, int, int]:
+def append_rows(
+    table_uri: str,
+    rows: list[dict[str, Any]],
+    key_column: str = "event_id",
+    table_description: str | None = None,
+    arrow_schema: pa.Schema | None = None,
+    table_name: str = "blueeconomy_event_envelope",
+) -> tuple[int, int, int]:
+    """Insert-only merge of *rows* into an append-only Delta table.
+
+    Idempotent on *key_column*: a replayed row with identical immutable
+    content is counted as already present; a key reused with conflicting
+    content fails closed. ``arrow_schema`` fixes the physical schema for
+    tables with typed columns (for example vessel observations).
+    """
+    if not rows:
+        raise ValueError("refusing to append an empty row batch")
     validate_table_uri(table_uri)
-    arrow_table = pa.Table.from_pylist(events)
+    if arrow_schema is not None:
+        arrow_table = pa.Table.from_pylist(rows, schema=arrow_schema)
+    else:
+        arrow_table = pa.Table.from_pylist(rows)
     if not delta_table_exists(table_uri):
+        description = EVENT_TABLE_DESCRIPTION
+        if table_description is not None:
+            if not table_description or table_description != table_description.strip():
+                raise ValueError("table description must be canonical non-empty text")
+            description = table_description
         write_deltalake(
             table_uri,
             arrow_table,
             mode="error",
-            name="blueeconomy_event_envelope",
-            description=EVENT_TABLE_DESCRIPTION,
+            name=table_name,
+            description=description,
             configuration={"delta.appendOnly": "true"},
         )
-        return DeltaTable(table_uri).version(), len(events), 0
+        return DeltaTable(table_uri).version(), len(rows), 0
 
     for attempt in range(1, MAX_COMMIT_ATTEMPTS + 1):
         table = DeltaTable(table_uri)
         if table.metadata().configuration.get("delta.appendOnly") != "true":
             raise ValueError("existing Delta table is not configured with delta.appendOnly=true")
-        reject_conflicting_event_replays(table, events)
+        reject_conflicting_replays(table, rows, key_column)
         try:
             metrics = (
                 table.merge(
                     source=arrow_table,
-                    predicate="target.event_id = source.event_id",
+                    predicate=f"target.{key_column} = source.{key_column}",
                     source_alias="source",
                     target_alias="target",
                 )
@@ -335,16 +481,38 @@ def append_events(table_uri: str, events: list[dict[str, Any]]) -> tuple[int, in
             )
             records_written = int(metrics["num_target_rows_inserted"])
             retained = DeltaTable(table_uri)
-            reject_conflicting_event_replays(retained, events)
+            reject_conflicting_replays(retained, rows, key_column)
             return (
                 retained.version(),
                 records_written,
-                len(events) - records_written,
+                len(rows) - records_written,
             )
         except CommitFailedError:
             if attempt == MAX_COMMIT_ATTEMPTS:
                 raise
     raise RuntimeError("Delta commit retry loop exhausted unexpectedly")
+
+
+def append_events(
+    table_uri: str,
+    events: list[dict[str, Any]],
+    table_description: str | None = None,
+) -> tuple[int, int, int]:
+    # Phase-7 OTel span (no-op when telemetry is disabled). This is also the
+    # S3/MinIO client span: Delta writes go through deltalake/object_store,
+    # which is the only storage client (no boto3/httpx S3 client exists).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.bronze.append") as span:
+        span.set_attribute("lakehouse.rows", len(events))
+        span.set_attribute("storage.uri_scheme", table_uri.split(":", 1)[0])
+        version, written, already_present = append_rows(
+            table_uri, events, table_description=table_description
+        )
+        span.set_attribute("lakehouse.records_written", written)
+        span.set_attribute("lakehouse.records_already_present", already_present)
+        span.set_attribute("lakehouse.table_version", version)
+        return version, written, already_present
 
 
 def write_report(path: Path, report: IngestionReport) -> None:

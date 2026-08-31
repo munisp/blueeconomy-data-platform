@@ -1,0 +1,38 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "eventType": "mrv.fuel-report.v1",
+  "occurredAt": "2026-09-02T06:30:00Z",
+  "producer": "blueeconomy-geo-service",
+  "correlationId": "corr-mrv-fuel-report-0001",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "timestamp": "2026-09-02T06:30:00Z",
+    "entry": [
+      {
+        "fullUrl": "urn:uuid:b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+        "resource": {
+          "resourceType": "Basic",
+          "id": "mrv-fuel-report-0001",
+          "code": {
+            "text": "mrv.fuel-report.v1"
+          },
+          "extension": [
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/domain-payload",
+              "valueString": "{\"report_id\":\"7f3a1c2e-9b4d-4e5f-8a6b-1c2d3e4f5a6b\",\"imo_number\":\"9081716\",\"period_from\":\"2026-08-01T00:00:00Z\",\"period_to\":\"2026-08-31T23:59:59Z\",\"consumer\":\"MAIN_ENGINE\",\"fuel_grade\":\"HFO_RME-RMK\",\"method\":\"A\",\"fuel_tonnes\":412.5,\"distance_nm\":5210.0,\"hours_underway\":648.0,\"bdn_ref\":\"BDN-2026-0844\"}"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-mrv-api",
+    "principalRole": "mrv-reporter",
+    "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImJsdWVlY29ub215LWdlby1zZXJ2aWNlLTAifQ.eyJjbGFzc2lmaWNhdGlvbiI6IkNPTkZJREVOVElBTCIsImNvcnJlbGF0aW9uSWQiOiJjb3JyLW1ydi1mdWVsLXJlcG9ydC0wMDAxIiwiZW52ZWxvcGVWZXJzaW9uIjoiMS4wIiwiZXZlbnRJZCI6ImExYjJjM2Q0LWU1ZjYtNGE3Yi04YzlkLTBlMWYyYTNiNGM1ZCIsImV2ZW50VHlwZSI6Im1ydi5mdWVsLXJlcG9ydC52MSIsImZoaXIiOnsiZW50cnkiOlt7ImZ1bGxVcmwiOiJ1cm46dXVpZDpiMmMzZDRlNS1mNmE3LTRiOGMtOWQwZS0xZjJhM2I0YzVkNmUiLCJyZXNvdXJjZSI6eyJjb2RlIjp7InRleHQiOiJtcnYuZnVlbC1yZXBvcnQudjEifSwiZXh0ZW5zaW9uIjpbeyJ1cmwiOiJodHRwczovL2JsdWVlY29ub215Lmdvdi5uZy9maGlyL1N0cnVjdHVyZURlZmluaXRpb24vZG9tYWluLXBheWxvYWQiLCJ2YWx1ZVN0cmluZyI6IntcInJlcG9ydF9pZFwiOlwiN2YzYTFjMmUtOWI0ZC00ZTVmLThhNmItMWMyZDNlNGY1YTZiXCIsXCJpbW9fbnVtYmVyXCI6XCI5MDgxNzE2XCIsXCJwZXJpb2RfZnJvbVwiOlwiMjAyNi0wOC0wMVQwMDowMDowMFpcIixcInBlcmlvZF90b1wiOlwiMjAyNi0wOC0zMVQyMzo1OTo1OVpcIixcImNvbnN1bWVyXCI6XCJNQUlOX0VOR0lORVwiLFwiZnVlbF9ncmFkZVwiOlwiSEZPX1JNRS1STUtcIixcIm1ldGhvZFwiOlwiQVwiLFwiZnVlbF90b25uZXNcIjo0MTIuNSxcImRpc3RhbmNlX25tXCI6NTIxMC4wLFwiaG91cnNfdW5kZXJ3YXlcIjo2NDguMCxcImJkbl9yZWZcIjpcIkJETi0yMDI2LTA4NDRcIn0ifV0sImlkIjoibXJ2LWZ1ZWwtcmVwb3J0LTAwMDEiLCJyZXNvdXJjZVR5cGUiOiJCYXNpYyJ9fV0sInJlc291cmNlVHlwZSI6IkJ1bmRsZSIsInRpbWVzdGFtcCI6IjIwMjYtMDktMDJUMDY6MzA6MDBaIiwidHlwZSI6Im1lc3NhZ2UifSwib2NjdXJyZWRBdCI6IjIwMjYtMDktMDJUMDY6MzA6MDBaIiwicHJvZHVjZXIiOiJibHVlZWNvbm9teS1nZW8tc2VydmljZSIsInByb3ZlbmFuY2UiOnsibGVkZ2VyQ29tbWl0SGFzaCI6ImEzYjRjNWQ2ZTdmODA5MWEyYjNjNGQ1ZTZmNzA4MTkyYTNiNGM1ZDZlN2Y4MDkxYTJiM2M0ZDVlNmY3MDgxOTIiLCJwcmluY2lwYWxJZCI6InN2Yy1tcnYtYXBpIiwicHJpbmNpcGFsUm9sZSI6Im1ydi1yZXBvcnRlciJ9fQ.oQkqd0Yn5ZhfOgp5dUnQKwAfluFpqtz6SWmTlUdM5ZJGvtxBMniO-rRqdODOlNRYr8clr46EPjY86AaazydLDA",
+    "ledgerCommitHash": "a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192"
+  },
+  "classification": "CONFIDENTIAL"
+}
