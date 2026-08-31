@@ -32,7 +32,7 @@ MRV_CLASSIFICATION = "mrv_confidential"
 BLUECARBON_CLASSIFICATION = "bluecarbon_internal"
 
 CVFF_TOPIC_PREFIX = "cvff."
-PLATFORM_TOPIC_PREFIXES = ("ports.", "ferries.", "vessels.")
+PLATFORM_TOPIC_PREFIXES = ("ports.", "ferries.", "vessels.", "stamps.")
 SEAFARER_TOPIC_PREFIXES = ("seafarer.",)
 FISHERIES_TOPIC_PREFIXES = ("fisheries.", "coldchain.", "export.")
 ISR_TOPIC_PREFIXES = ("maritime.isr.", "maritime.behaviour.", "maritime.outcome.")

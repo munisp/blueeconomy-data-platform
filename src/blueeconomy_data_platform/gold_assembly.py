@@ -45,6 +45,7 @@ from blueeconomy_data_platform.export_consignment import (
     read_export_consignments,
 )
 from blueeconomy_data_platform.bluecarbon_gold import assemble_bluecarbon_public_registry_gold
+from blueeconomy_data_platform.excise_stamps_gold import assemble_excise_stamps_gold
 from blueeconomy_data_platform.medallion import curate_gold
 from blueeconomy_data_platform.mrv_gold import assemble_mrv_vessel_annual_gold
 from blueeconomy_data_platform.port_statistics import (
@@ -97,6 +98,7 @@ class GoldAssemblyReport:
     exported_rows: int | None
     stats_run_id: str | None
     stats_report_sha256: str | None
+    excise_stamp_fact_rows: int | None
 
 
 def _require_env(environment: Mapping[str, str], name: str) -> str:
@@ -181,6 +183,7 @@ def _run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
     writer = SegregatedDeltaWriter(config.scope, config.scope_root_uri)
     exported_rows: int | None = None
     stats_result: PortStatisticsRunResult | None = None
+    excise_rows: int | None = None
     if config.scope is LakehouseScope.CVFF:
         assembly = "cvff-silver-gold-ledger-commitments"
         table_version, gold_rows = curate_gold(writer)
@@ -197,6 +200,9 @@ def _run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
         signing_key, signing_kid = load_signing_key_from_env()
         stats_result = run_port_statistics(writer, config.stats_period, signing_key, signing_kid)
         table_version, gold_rows = stats_result.values_table_version, stats_result.rows_emitted
+        # WP-1: deterministic 1:1 excise stamp facts projection from the
+        # verified stamps.* silver events (fail-closed on malformed money).
+        _, excise_rows = assemble_excise_stamps_gold(writer)
     else:
         assembly = "fisheries-gold-export-consignments"
         table_version, gold_rows = assemble_export_consignment_gold(writer)
@@ -217,6 +223,7 @@ def _run(config: GoldAssemblyConfig) -> GoldAssemblyReport:
         exported_rows=exported_rows,
         stats_run_id=stats_result.run_id if stats_result is not None else None,
         stats_report_sha256=stats_result.report_sha256 if stats_result is not None else None,
+        excise_stamp_fact_rows=excise_rows,
     )
 
 
