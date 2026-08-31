@@ -1,0 +1,35 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "7a1d4c2e-5b8f-4a09-9e3c-1f6b8d0a2c55",
+  "eventType": "cvff.disbursement.v1",
+  "occurredAt": "2026-08-12T12:05:00Z",
+  "producer": "financial-controls",
+  "correlationId": "7a1d4c2e-5b8f-4a09-9e3c-1f6b8d0a2c55",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Basic",
+          "internalEventType": "cvff.disbursed",
+          "subjectId": "cvff-application-00042",
+          "application_id": "cvff-application-00042",
+          "intent_id": "a4b6c8d0e2f40618293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "amount": "1250000.00",
+          "currency": "NGN",
+          "maker": "svc-financial-controls",
+          "role": "disbursement-approver",
+          "state": "disbursed"
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-financial-controls",
+    "principalRole": "disbursement-approver",
+    "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImZpbmFuY2lhbC1jb250cm9scy0wIn0.eyJjbGFzc2lmaWNhdGlvbiI6IkZJRFVDSUFSWV9TRUdSRUdBVEVEIiwiY29ycmVsYXRpb25JZCI6IjdhMWQ0YzJlLTViOGYtNGEwOS05ZTNjLTFmNmI4ZDBhMmM1NSIsImVudmVsb3BlVmVyc2lvbiI6IjEuMCIsImV2ZW50SWQiOiI3YTFkNGMyZS01YjhmLTRhMDktOWUzYy0xZjZiOGQwYTJjNTUiLCJldmVudFR5cGUiOiJjdmZmLmRpc2J1cnNlbWVudC52MSIsImZoaXIiOnsiZW50cnkiOlt7InJlc291cmNlIjp7ImFtb3VudCI6IjEyNTAwMDAuMDAiLCJhcHBsaWNhdGlvbl9pZCI6ImN2ZmYtYXBwbGljYXRpb24tMDAwNDIiLCJjdXJyZW5jeSI6Ik5HTiIsImludGVudF9pZCI6ImE0YjZjOGQwZTJmNDA2MTgyOTNhNGI1YzZkN2U4ZjkwYTFiMmMzZDRlNWY2MDcxODI5M2E0YjVjNmQ3ZThmOTAiLCJpbnRlcm5hbEV2ZW50VHlwZSI6ImN2ZmYuZGlzYnVyc2VkIiwibWFrZXIiOiJzdmMtZmluYW5jaWFsLWNvbnRyb2xzIiwicmVzb3VyY2VUeXBlIjoiQmFzaWMiLCJyb2xlIjoiZGlzYnVyc2VtZW50LWFwcHJvdmVyIiwic3RhdGUiOiJkaXNidXJzZWQiLCJzdWJqZWN0SWQiOiJjdmZmLWFwcGxpY2F0aW9uLTAwMDQyIn19XSwicmVzb3VyY2VUeXBlIjoiQnVuZGxlIiwidHlwZSI6Im1lc3NhZ2UifSwib2NjdXJyZWRBdCI6IjIwMjYtMDgtMTJUMTI6MDU6MDBaIiwicHJvZHVjZXIiOiJmaW5hbmNpYWwtY29udHJvbHMiLCJwcm92ZW5hbmNlIjp7ImxlZGdlckNvbW1pdEhhc2giOiJhNGI2YzhkMGUyZjQwNjE4MjkzYTRiNWM2ZDdlOGY5MGExYjJjM2Q0ZTVmNjA3MTgyOTNhNGI1YzZkN2U4ZjkwIiwicHJpbmNpcGFsSWQiOiJzdmMtZmluYW5jaWFsLWNvbnRyb2xzIiwicHJpbmNpcGFsUm9sZSI6ImRpc2J1cnNlbWVudC1hcHByb3ZlciJ9fQ.HsS_us4Nm2t-qIP61KAV7JPQvasW-SKJ1N30c3uoORa0eZpaV8Ie8NZ0wVDG3maskfQi_Sq_2EVWyun4dGhfDw",
+    "ledgerCommitHash": "a4b6c8d0e2f40618293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+  },
+  "classification": "FIDUCIARY_SEGREGATED"
+}

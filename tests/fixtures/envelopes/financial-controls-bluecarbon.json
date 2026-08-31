@@ -1,0 +1,38 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "f1e2d3c4-b5a6-4978-8a6b-5c4d3e2f1a0b",
+  "eventType": "bluecarbon.project.v1",
+  "occurredAt": "2026-09-05T11:45:00Z",
+  "producer": "financial-controls",
+  "correlationId": "corr-bluecarbon-project-0001",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "timestamp": "2026-09-05T11:45:00Z",
+    "entry": [
+      {
+        "fullUrl": "urn:uuid:e2d3c4b5-a697-4b8a-9b5c-4d3e2f1a0b9c",
+        "resource": {
+          "resourceType": "Basic",
+          "id": "bluecarbon-project-0001",
+          "code": {
+            "text": "bluecarbon.project.v1"
+          },
+          "extension": [
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/domain-payload",
+              "valueString": "{\"project_id\":\"NG-BC-2026-0001\",\"project_name\":\"Ondo Mangrove Restoration\",\"state\":\"REGISTERED\",\"ecosystem\":\"mangrove\",\"methodology\":\"VM0033 v2.1\",\"country_code\":\"NG\",\"strata_centroids\":[{\"stratum\":\"mangrove-a\",\"latitude\":6.05,\"longitude\":4.79}],\"external_registry\":\"verra\",\"external_project_id\":\"VCS-4127\"}"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "svc-bluecarbon-api",
+    "principalRole": "bc-registry-admin",
+    "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6ImZpbmFuY2lhbC1jb250cm9scy0wIn0.eyJjbGFzc2lmaWNhdGlvbiI6IklOVEVSTkFMIiwiY29ycmVsYXRpb25JZCI6ImNvcnItYmx1ZWNhcmJvbi1wcm9qZWN0LTAwMDEiLCJlbnZlbG9wZVZlcnNpb24iOiIxLjAiLCJldmVudElkIjoiZjFlMmQzYzQtYjVhNi00OTc4LThhNmItNWM0ZDNlMmYxYTBiIiwiZXZlbnRUeXBlIjoiYmx1ZWNhcmJvbi5wcm9qZWN0LnYxIiwiZmhpciI6eyJlbnRyeSI6W3siZnVsbFVybCI6InVybjp1dWlkOmUyZDNjNGI1LWE2OTctNGI4YS05YjVjLTRkM2UyZjFhMGI5YyIsInJlc291cmNlIjp7ImNvZGUiOnsidGV4dCI6ImJsdWVjYXJib24ucHJvamVjdC52MSJ9LCJleHRlbnNpb24iOlt7InVybCI6Imh0dHBzOi8vYmx1ZWVjb25vbXkuZ292Lm5nL2ZoaXIvU3RydWN0dXJlRGVmaW5pdGlvbi9kb21haW4tcGF5bG9hZCIsInZhbHVlU3RyaW5nIjoie1wicHJvamVjdF9pZFwiOlwiTkctQkMtMjAyNi0wMDAxXCIsXCJwcm9qZWN0X25hbWVcIjpcIk9uZG8gTWFuZ3JvdmUgUmVzdG9yYXRpb25cIixcInN0YXRlXCI6XCJSRUdJU1RFUkVEXCIsXCJlY29zeXN0ZW1cIjpcIm1hbmdyb3ZlXCIsXCJtZXRob2RvbG9neVwiOlwiVk0wMDMzIHYyLjFcIixcImNvdW50cnlfY29kZVwiOlwiTkdcIixcInN0cmF0YV9jZW50cm9pZHNcIjpbe1wic3RyYXR1bVwiOlwibWFuZ3JvdmUtYVwiLFwibGF0aXR1ZGVcIjo2LjA1LFwibG9uZ2l0dWRlXCI6NC43OX1dLFwiZXh0ZXJuYWxfcmVnaXN0cnlcIjpcInZlcnJhXCIsXCJleHRlcm5hbF9wcm9qZWN0X2lkXCI6XCJWQ1MtNDEyN1wifSJ9XSwiaWQiOiJibHVlY2FyYm9uLXByb2plY3QtMDAwMSIsInJlc291cmNlVHlwZSI6IkJhc2ljIn19XSwicmVzb3VyY2VUeXBlIjoiQnVuZGxlIiwidGltZXN0YW1wIjoiMjAyNi0wOS0wNVQxMTo0NTowMFoiLCJ0eXBlIjoibWVzc2FnZSJ9LCJvY2N1cnJlZEF0IjoiMjAyNi0wOS0wNVQxMTo0NTowMFoiLCJwcm9kdWNlciI6ImZpbmFuY2lhbC1jb250cm9scyIsInByb3ZlbmFuY2UiOnsibGVkZ2VyQ29tbWl0SGFzaCI6ImI0YzVkNmU3ZjgwOTFhMmIzYzRkNWU2ZjcwODE5MmEzYjRjNWQ2ZTdmODA5MWEyYjNjNGQ1ZTZmNzA4MTkyYTMiLCJwcmluY2lwYWxJZCI6InN2Yy1ibHVlY2FyYm9uLWFwaSIsInByaW5jaXBhbFJvbGUiOiJiYy1yZWdpc3RyeS1hZG1pbiJ9fQ.Bnq9c8w7tuyMisdBbuAqF1UOe1GM2eIgN7oj4-xWSfB9g-VyiepSd5vxlAscSYZ9naDA-NeJXmOBzMEz0bAlBA",
+    "ledgerCommitHash": "b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3"
+  },
+  "classification": "INTERNAL"
+}

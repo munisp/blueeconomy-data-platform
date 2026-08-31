@@ -5,25 +5,44 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from confluent_kafka import Consumer, KafkaError, KafkaException, Message
+from confluent_kafka import Consumer, KafkaError, KafkaException, Message, Producer
 from jsonschema import Draft202012Validator
 
+from blueeconomy_data_platform.dlq import (
+    REASON_DUPLICATE_EVENT_ID,
+    DeadLetterQueue,
+    DeadLetterSink,
+    reason_for_error,
+)
 from blueeconomy_data_platform.ingest import (
     MAX_LINE_BYTES,
     append_events,
     load_schema,
+    map_canonical_envelope,
     normalize_event,
     reject_non_finite_constant,
     require_canonical_text,
+)
+from blueeconomy_data_platform.segregation import (
+    LakehouseScope,
+    enforce_event_scope,
+    enforce_topic_scope,
+    require_scope_table_uri,
+)
+from blueeconomy_data_platform.signature_verification import (
+    EnvelopeSignatureVerifier,
+    load_key_directory_from_env,
 )
 
 TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,248}$")
@@ -39,9 +58,13 @@ class KafkaIngestionReport:
     bootstrap_reference_sha256: str
     consumer_group_sha256: str
     topic: str
+    lakehouse_scope: str
     messages_received: int
     records_written: int
     records_already_present: int
+    dlq_topic: str
+    messages_quarantined: int
+    dlq_reason_counts: dict[str, int]
     table_reference_sha256: str
     table_version: int
     committed_offsets: dict[str, int]
@@ -66,7 +89,23 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--allow-insecure-localhost", action="store_true")
     parser.add_argument("--max-messages", required=True, type=int)
     parser.add_argument("--idle-timeout-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--lakehouse-scope",
+        required=True,
+        choices=tuple(scope.value for scope in LakehouseScope),
+        help="Segregated lakehouse scope this consumer is authorized to write.",
+    )
     parser.add_argument("--table-uri", required=True)
+    parser.add_argument(
+        "--dlq-topic",
+        required=True,
+        help="Dead-letter topic for poison messages; mandatory (no DLQ, no consumption).",
+    )
+    parser.add_argument(
+        "--dlq-table-uri",
+        required=True,
+        help="Append-only Delta quarantine table for dead-lettered messages.",
+    )
     parser.add_argument("--schema", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     return parser.parse_args()
@@ -130,7 +169,19 @@ def validate_transport(arguments: argparse.Namespace) -> dict[str, Any]:
     return configuration
 
 
-def decode_event(value: bytes | None, validator: Draft202012Validator) -> dict[str, Any]:
+def decode_event(
+    value: bytes | None,
+    validator: Draft202012Validator,
+    verifier: EnvelopeSignatureVerifier,
+) -> dict[str, Any]:
+    """Decode one Kafka message into a normalized event, failing closed.
+
+    The envelope is schema-validated and then its provenance signature is
+    cryptographically verified against the startup-loaded key directory
+    (unknown kid, malformed JWS, payload mismatch or invalid signature are
+    rejected, logged and counted); unverified envelopes never reach
+    persistence.
+    """
     if value is None or len(value) == 0 or len(value) > MAX_LINE_BYTES:
         raise ValueError(f"Kafka message value must contain 1 to {MAX_LINE_BYTES} bytes")
     try:
@@ -145,18 +196,58 @@ def decode_event(value: bytes | None, validator: Draft202012Validator) -> dict[s
     if errors:
         messages = "; ".join(error.message for error in errors)
         raise ValueError(f"Kafka event fails event-envelope validation: {messages}")
-    return normalize_event(document)
+    # Signature verification canonicalizes under the ECMAScript numeric model
+    # (every JSON number is an IEEE-754 double), so the signed view is parsed
+    # with integers widened to float to match peer implementations exactly.
+    signed_view = json.loads(
+        value.decode("utf-8"),
+        parse_int=float,
+        parse_float=float,
+        parse_constant=reject_non_finite_constant,
+    )
+    verifier.verify(signed_view)
+    return normalize_event(map_canonical_envelope(document))
 
 
 def collect_messages(
     consumer: Consumer,
-    validator: Draft202012Validator,
+    decode: Callable[[bytes | None], dict[str, Any]],
     maximum: int,
     idle_timeout_seconds: float,
-) -> tuple[list[dict[str, Any]], list[Message]]:
+    dlq: DeadLetterSink,
+) -> tuple[list[dict[str, Any]], list[Message], dict[str, int]]:
+    """Collect a bounded batch, quarantining poison messages to the DLQ.
+
+    A malformed, schema-invalid, unverifiable or batch-duplicated message is
+    quarantined through *dlq* (fail-closed: a quarantine failure raises and
+    halts the run before any offset commit) and the pipeline continues with
+    the next message; its offset joins the commit set only after the DLQ
+    copy and quarantine-table row are durably written. Broker-level errors
+    still halt the run — they are not message poison.
+    """
+    # Phase-7 OTel span (no-op when telemetry is disabled).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.ingest.collect") as span:
+        events, messages, reason_counts = _collect_messages(
+            consumer, decode, maximum, idle_timeout_seconds, dlq
+        )
+        span.set_attribute("lakehouse.messages_received", len(messages))
+        span.set_attribute("lakehouse.messages_quarantined", sum(reason_counts.values()))
+        return events, messages, reason_counts
+
+
+def _collect_messages(
+    consumer: Consumer,
+    decode: Callable[[bytes | None], dict[str, Any]],
+    maximum: int,
+    idle_timeout_seconds: float,
+    dlq: DeadLetterSink,
+) -> tuple[list[dict[str, Any]], list[Message], dict[str, int]]:
     events: list[dict[str, Any]] = []
     messages: list[Message] = []
     event_ids: set[str] = set()
+    reason_counts: dict[str, int] = {}
     deadline = time.monotonic() + idle_timeout_seconds
     while len(messages) < maximum:
         remaining = deadline - time.monotonic()
@@ -170,20 +261,79 @@ def collect_messages(
             if message_error.code() == KafkaError._PARTITION_EOF:
                 continue
             raise KafkaException(message_error)
-        event = decode_event(message.value(), validator)
-        event_id = event["event_id"]
-        if event_id in event_ids:
-            raise ValueError(f"Kafka batch repeats event_id {event_id!r}")
+        try:
+            event = decode(message.value())
+            event_id = event["event_id"]
+            if event_id in event_ids:
+                raise ValueError(f"Kafka batch repeats event_id {event_id!r}")
+        except ValueError as error:
+            reason = (
+                REASON_DUPLICATE_EVENT_ID
+                if "repeats event_id" in str(error)
+                else reason_for_error(error)
+            )
+            topic = message.topic()
+            partition = message.partition()
+            offset = message.offset()
+            if topic is None or partition is None or offset is None:
+                raise ValueError(
+                    "poison Kafka message did not contain topic, partition and offset"
+                ) from error
+            dlq.quarantine(message.value(), topic, partition, offset, reason, str(error))
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            messages.append(message)
+            deadline = time.monotonic() + idle_timeout_seconds
+            continue
         event_ids.add(event_id)
         events.append(event)
         messages.append(message)
         deadline = time.monotonic() + idle_timeout_seconds
     if not messages:
         raise ValueError("no Kafka messages were received before the idle timeout")
-    return events, messages
+    return events, messages, reason_counts
+
+
+def enforce_record_classification(events: list[dict[str, Any]], scope: LakehouseScope) -> None:
+    """Fail closed when a classified-scope record lacks its per-record clearance label.
+
+    Every event written to the ISR scope must carry a validated
+    ``record_classification`` label (enforced by the event envelope and
+    :func:`blueeconomy_data_platform.ingest.normalize_event`); the label is
+    persisted as a column so readers apply row-level clearance filtering.
+    """
+    if scope is not LakehouseScope.ISR:
+        return
+    for event in events:
+        if not isinstance(event.get("record_classification"), str):
+            raise ValueError(
+                f"isr scope record {event.get('event_id')!r} is missing its "
+                "record_classification label; unlabelled classified records are rejected"
+            )
+
+
+def build_dlq_producer(consumer_configuration: dict[str, Any]) -> Producer:
+    """Derive the DLQ producer from the validated consumer transport configuration."""
+    configuration = {
+        key: value
+        for key, value in consumer_configuration.items()
+        if not key.startswith(("group.", "enable.auto", "auto.offset", "allow.auto", "client."))
+    }
+    configuration["client.id"] = "blueeconomy-data-platform-dlq"
+    configuration["acks"] = "all"
+    return Producer(configuration)
 
 
 def commit_messages(consumer: Consumer, messages: list[Message]) -> dict[str, int]:
+    # Phase-7 OTel span (no-op when telemetry is disabled).
+    from blueeconomy_data_platform.telemetry import get_tracer
+
+    with get_tracer().start_as_current_span("lakehouse.ingest.commit_offsets") as span:
+        offsets = _commit_messages(consumer, messages)
+        span.set_attribute("lakehouse.partitions_committed", len(offsets))
+        return offsets
+
+
+def _commit_messages(consumer: Consumer, messages: list[Message]) -> dict[str, int]:
     offsets: dict[str, int] = {}
     latest_by_partition: dict[tuple[str, int], Message] = {}
     for message in messages:
@@ -229,43 +379,111 @@ def write_kafka_report(path: Path, report: KafkaIngestionReport) -> None:
 
 
 def main() -> None:
+    # OTel (Phase-7): no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set — the
+    # sanctioned fail-open; ingestion never depends on telemetry.
+    from blueeconomy_data_platform.telemetry import init_telemetry, shutdown_telemetry
+
+    init_telemetry(service_name="blueeconomy-data-platform-kafka-ingest", version="0.1.0")
+    try:
+        _run()
+    finally:
+        shutdown_telemetry()
+
+
+def _run() -> None:
+    from blueeconomy_data_platform import telemetry
+
     arguments = parse_arguments()
     started_at = datetime.now(UTC)
     consumer: Consumer | None = None
     try:
         validate_report_path(arguments.schema, arguments.report)
+        scope = LakehouseScope(arguments.lakehouse_scope)
+        enforce_topic_scope(arguments.topic, scope)
+        require_scope_table_uri(scope, arguments.table_uri)
+        dlq_topic = require_canonical_text(arguments.dlq_topic, "dlq_topic", 249)
+        if not TOPIC_PATTERN.fullmatch(dlq_topic):
+            raise ValueError("dlq_topic is not a valid Kafka topic name")
+        if dlq_topic == arguments.topic:
+            raise ValueError("dlq_topic must differ from the consumed topic")
+        enforce_topic_scope(dlq_topic, scope)
+        require_scope_table_uri(scope, arguments.dlq_table_uri)
         configuration = validate_transport(arguments)
         validator = load_schema(arguments.schema)
+        # Fail-closed: the consumer refuses to start without a readable
+        # producer public-key directory (KEY_DIRECTORY_PATH).
+        verifier = EnvelopeSignatureVerifier(load_key_directory_from_env())
+        dlq: DeadLetterSink = DeadLetterQueue(
+            producer=build_dlq_producer(configuration),
+            dlq_topic=dlq_topic,
+            quarantine_table_uri=arguments.dlq_table_uri,
+            consumer_group=arguments.group_id,
+        )
         consumer = Consumer(configuration)
         consumer.subscribe([arguments.topic])
-        events, messages = collect_messages(
+        events, messages, dlq_reason_counts = collect_messages(
             consumer,
-            validator,
+            lambda value: decode_event(value, validator, verifier),
             arguments.max_messages,
             arguments.idle_timeout_seconds,
+            dlq,
         )
-        table_version, records_written, records_already_present = append_events(
-            arguments.table_uri, events
-        )
-        committed_offsets = commit_messages(consumer, messages)
+        # DAG-level trace for this pipeline run (ingest -> bronze): joins the
+        # first upstream traceparent found on the consumed records, links the
+        # remaining ones, and lifts tenant.id/agency baggage onto the span.
+        parent_context, message_links = telemetry.extract_message_links(messages)
+        span_attributes = {
+            "messaging.kafka.topic": arguments.topic,
+            "lakehouse.scope": scope.value,
+            **telemetry.baggage_span_attributes(parent_context),
+        }
+        tracer = telemetry.get_tracer()
+        with tracer.start_as_current_span(
+            "lakehouse.pipeline.kafka_ingest",
+            context=parent_context,
+            links=message_links,
+            attributes=span_attributes,
+        ) as pipeline_span:
+            enforce_event_scope(events, scope)
+            enforce_record_classification(events, scope)
+            if events:
+                table_version, records_written, records_already_present = append_events(
+                    arguments.table_uri, events
+                )
+            else:
+                # An all-poison batch still commits offsets after quarantine; the
+                # bronze table is untouched and the report reflects zero writes.
+                table_version, records_written, records_already_present = (-1, 0, 0)
+            committed_offsets = commit_messages(consumer, messages)
+            pipeline_span.set_attribute("lakehouse.messages_received", len(messages))
+            pipeline_span.set_attribute("lakehouse.records_written", records_written)
         report = KafkaIngestionReport(
-            schema_version="blueeconomy.lakehouse.kafka-ingestion-report.v1",
+            schema_version="blueeconomy.lakehouse.kafka-ingestion-report.v2",
             started_at=started_at.isoformat(),
             completed_at=datetime.now(UTC).isoformat(),
             bootstrap_reference_sha256=reference_sha256(arguments.bootstrap_servers),
             consumer_group_sha256=reference_sha256(arguments.group_id),
             topic=arguments.topic,
+            lakehouse_scope=scope.value,
             messages_received=len(messages),
             records_written=records_written,
             records_already_present=records_already_present,
+            dlq_topic=dlq_topic,
+            messages_quarantined=sum(dlq_reason_counts.values()),
+            dlq_reason_counts=dict(sorted(dlq_reason_counts.items())),
             table_reference_sha256=reference_sha256(arguments.table_uri),
             table_version=table_version,
             committed_offsets=committed_offsets,
-            source_systems=sorted({event["source_system"] for event in events}),
+            source_systems=sorted({str(event["source_system"]) for event in events}),
             data_classifications=sorted({event["data_classification"] for event in events}),
         )
         write_kafka_report(arguments.report, report)
         print(json.dumps(asdict(report), sort_keys=True))
+        logging.getLogger("blueeconomy_data_platform.kafka_ingest").info(
+            "ingest complete: signatures verified=%d rejected=%s",
+            verifier.metrics.verified,
+            verifier.metrics.rejected,
+        )
     except (KafkaException, OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"blueeconomy-ingest-kafka: {error}", file=sys.stderr)
         raise SystemExit(1) from error

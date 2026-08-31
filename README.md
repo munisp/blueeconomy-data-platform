@@ -27,7 +27,9 @@ blueeconomy-ingest-events \
 
 The v2 file-ingestion report contains record counts, already-present counts, source systems, classifications, table version, the input-file SHA-256 and a SHA-256 reference for the table location. It does not disclose the raw input path, table URI or payload. The Kafka report similarly hashes broker and consumer-group references, records confirmed partition offsets and excludes credentials and message payloads.
 
-For Kafka ingestion, `--bootstrap-servers`, `--topic`, `--group-id`, `--security-protocol`, `--max-messages`, `--table-uri`, `--schema` and `--report` are mandatory. `PLAINTEXT` is accepted only for explicit loopback integration runs; non-local execution requires `SSL` or `SASL_SSL`, CA material and environment-injected SASL credentials where applicable. The proven local Apache Kafka-to-Delta path is documented in [`integration/kafka-delta`](integration/kafka-delta/README.md).
+For Kafka ingestion, `--bootstrap-servers`, `--topic`, `--group-id`, `--security-protocol`, `--max-messages`, `--lakehouse-scope`, `--table-uri`, `--schema` and `--report` are mandatory. `PLAINTEXT` is accepted only for explicit loopback integration runs; non-local execution requires `SSL` or `SASL_SSL`, CA material and environment-injected SASL credentials where applicable. The proven local Apache Kafka-to-Delta path is documented in [`integration/kafka-delta`](integration/kafka-delta/README.md).
+
+Every consumed envelope's `provenance.signature` is cryptographically verified before any persistence, per the fleet scheme in blueeconomy-contracts [`docs/envelope-signature.md`](https://github.com/munisp/blueeconomy-contracts/blob/main/docs/envelope-signature.md): a JWS compact serialization (EdDSA/Ed25519) over the JCS-canonicalized (RFC 8785) JSON of the envelope minus the signature field, with protected header `{"alg":"EdDSA","kid":"<producer>-<epoch>"}`. The consumer loads the producer public-key directory (`{kid: base64url-ed25519-pubkey}`) from the file named by `KEY_DIRECTORY_PATH` at startup and refuses to start without it (fail closed). Unknown `kid`, malformed compact serializations, payload mismatches and invalid signatures are rejected, logged with a reason code and counted; rejected envelopes are never persisted and their offsets are never committed. Canonicalization is implemented in `src/blueeconomy_data_platform/jcs.py` (no dependency) and Ed25519 verification uses the pinned `cryptography` package.
 
 ## S2 GeoJSON geofence evaluation
 
@@ -55,4 +57,187 @@ The script runs Ruff formatting/linting, strict mypy, pytest with a real local D
 
 ## Data authority
 
-The schema requires `public`, `internal`, `confidential`, `restricted` or `highly_restricted` classification plus source-system and source-record references. These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
+The committed schema is the canonical platform event envelope (`blueeconomy.contracts.v1.EventEnvelope`, envelopeVersion `1.0`): camelCase `eventId`/`eventType`/`occurredAt`/`producer`/`correlationId`, the domain resource carried as the first entry of a FHIR R4 message `Bundle` under `fhir`, a `provenance` block (`principalId`, `principalRole`, `signature`, `ledgerCommitHash`) and the canonical `classification` vocabulary (`FIDUCIARY_SEGREGATED`, `CONFIDENTIAL`, `RESTRICTED`, `INTERNAL`, `PUBLIC`), with an optional per-record `recordClassification` clearance label (mandatory for ISR scope ingestion). At ingestion the canonical classification is mapped onto the internal lowercase per-scope labels (`fiduciary_segregated`, `seafarer_confidential`, `fisheries_operational`, `isr_classified` or the platform labels) from the classification and the event type's governed namespace, so a classification can never be laundered across a segregation boundary; anything outside the canonical contract fails closed. These fields do not grant permission to ingest a source. The accountable data owner must approve lawful purpose, data-sharing terms, minimisation, retention, correction, access, export and incident handling before target deployment.
+
+## Fiduciary segregation (Workstream C / CVFF)
+
+Workstream C (CVFF fintech) runs on a **physically segregated Delta Lake schema**, deployable on Azure Government ADLS Gen2 or any S3-compatible object storage (see [Cloud-agnostic storage configuration](#cloud-agnostic-storage-configuration)). Workstream C events carry the `fiduciary_segregated` classification and arrive on `cvff.*` Kafka topics; Workstream A (`ports.*`), Workstream B (`ferries.*`) and the vessel observation stream (`vessels.*`, written by the geo-service) remain in the platform scope. Phase 2 adds the Workstream D (seafarer credentials), E (fisheries catch/coldchain/export) and F (classified ISR) scopes under the same segregation model. There is no shared schema and no shared storage root between the scopes:
+
+| Scope | Kafka namespaces | Event classification | Delta tables |
+|---|---|---|---|
+| platform | `ports.*`, `ferries.*`, `vessels.*` | `public`, `internal`, `confidential`, `restricted`, `highly_restricted` | `<root>/platform/platform_bronze/events`, `platform_silver/events`, `platform_gold/events` |
+| cvff | `cvff.*` | `fiduciary_segregated` | `<root>/cvff/cvff_bronze/events`, `cvff_silver/events`, `cvff_gold/events` |
+| seafarer | `seafarer.*` | `seafarer_confidential` (CONFIDENTIAL credentials) | `<root>/seafarer/seafarer_bronze/events`, `seafarer_silver/events`, `seafarer_gold/events` |
+| fisheries | `fisheries.*`, `coldchain.*`, `export.*` | `fisheries_operational` | `<root>/fisheries/fisheries_bronze/events`, `fisheries_silver/events`, `fisheries_gold/events` |
+| isr | `maritime.isr.*`, `maritime.behaviour.*`, `maritime.outcome.*` | `isr_classified` (CLASSIFIED — highest bar) | `<root>/isr/isr_bronze/events`, `isr_silver/events`, `isr_gold/events` |
+| mrv | `mrv.*` | `mrv_confidential` (CONFIDENTIAL/INTERNAL evidence) | `<root>/mrv/mrv_bronze/events`, `mrv_silver/events`, `mrv_gold/events` + `mrv_gold/vessel_annual` |
+| bluecarbon | `bluecarbon.*` | `bluecarbon_internal` (INTERNAL/CONFIDENTIAL evidence) | `<root>/bluecarbon/bluecarbon_bronze/events`, `bluecarbon_silver/events`, `bluecarbon_gold/events` + `bluecarbon_gold/public_registry` (the scope's only public artefact) |
+
+The phase-2 scopes (Workstreams D, E, F) follow the same boundary model as cvff: each scope root must terminate in its own `<scope>*` path component and no other, every scope has its own medallion tables, and `SegregatedDeltaWriter`/`guard_write` enforce classification, topic and table-URI boundaries identically for every scope. The phase-8 scopes (mrv, bluecarbon) inherit the identical boundary rules; `scope_medallion` provides their generic bronze (append-only raw envelopes) and silver (deduplicated on `sha256(kafka_topic/kafka_partition/kafka_offset/eventId)`) layers, with scope-specific gold assemblers (`mrv_gold.vessel_annual` from VERIFIED annual reports only; `bluecarbon_gold.public_registry` as a fixed SELECT-list public projection that can never copy confidential evidence fields).
+
+### Boundary guarantees
+
+Segregation is enforced at the write path, not by routing convention:
+
+- `blueeconomy_data_platform.segregation.SegregatedDeltaWriter` is initialized for exactly one scope and one scope root. A cvff writer cannot be pointed at a non-`cvff*` root, and a platform writer cannot be pointed at a `cvff*` root — initialization fails closed.
+- `guard_write` raises `BoundaryViolationError` before any record is written when an event classification, Kafka topic or table URI belongs to the other scope. A platform writer cannot write a `fiduciary_segregated` record and a cvff writer cannot write any platform-classified record.
+- Classification and topic mappings fail closed: an unrecognized `data_classification` or a topic outside the `cvff.*`/`ports.*`/`ferries.*`/`vessels.*` namespaces is rejected, never defaulted.
+- `blueeconomy-ingest-kafka` requires `--lakehouse-scope platform|cvff|seafarer|fisheries|isr|mrv|bluecarbon`; the topic namespace, the event classifications in the batch and the target table URI must all match the declared scope before consumption is persisted.
+- Classification-labelled ingestion: ISR-scope records must additionally carry a per-record `record_classification` clearance label (`UNCLASSIFIED`, `RESTRICTED`, `CONFIDENTIAL` or `SECRET`). An ISR record without the label is rejected before any write; the validated label is persisted as a `record_classification` column so readers apply row-level clearance filtering (`access_policy.clearance_permits` / `filter_records_by_clearance`).
+
+### CVFF medallion layers
+
+`blueeconomy_data_platform.medallion` implements the segregated cvff medallion pipeline on top of `SegregatedDeltaWriter`:
+
+- **Bronze** — raw validated envelopes, append-only. The retention policy (default 30 days hot, 7 years cold, bounds-validated) is committed in the Delta table description at creation (the delta-rs kernel rejects custom table properties, so the horizons live in retained table metadata); `RetentionPolicy.tier_for` and `retention_report` classify records as `hot`, `cold` or `expired` for the operations runbook.
+- **Silver** — deduplicated on the composite key `sha256(kafka_topic/kafka_partition/kafka_offset/ledgerCommitHash)`. The `ledgerCommitHash` (64 lowercase hex) is required in the cvff payload. Replayed Kafka records with an identical dedup key are counted as already present and never duplicated; a dedup key reused with conflicting content fails closed.
+- **Gold** — a curated one-row-per-`ledgerCommitHash` snapshot (record count, occurrence window, source systems, event IDs) atomically overwritten from silver.
+
+### Segregated read access
+
+`blueeconomy_data_platform.access_policy` maps Keycloak-style role claims to readable schemas. Each segregated scope's schemas are readable **only** by that scope's roles:
+
+| Role claim | Readable schemas | Required clearance |
+|---|---|---|
+| `independent-auditor` | `cvff_bronze`, `cvff_silver`, `cvff_gold` | — (UNCLASSIFIED floor) |
+| `nimasa-approver` | `cvff_bronze`, `cvff_silver`, `cvff_gold` | — (UNCLASSIFIED floor) |
+| `cbn-observer` | `cvff_bronze`, `cvff_silver`, `cvff_gold` | — (UNCLASSIFIED floor) |
+| `fmmbe-oversight` | `platform_bronze`, `platform_silver`, `platform_gold` | — (UNCLASSIFIED floor) |
+| `seafarer-registry` | `seafarer_bronze`, `seafarer_silver`, `seafarer_gold` | CONFIDENTIAL |
+| `fisheries-operations` | `fisheries_bronze`, `fisheries_silver`, `fisheries_gold` | RESTRICTED |
+| `isr-analyst` | `isr_bronze`, `isr_silver`, `isr_gold` | SECRET (`isr_gold`: CONFIDENTIAL) |
+| `insurer-aggregator` | `isr_gold` only | CONFIDENTIAL |
+
+#### Clearance model (Workstream F)
+
+Clearance levels are strictly ordered: `UNCLASSIFIED < RESTRICTED < CONFIDENTIAL < SECRET`. For any schema above the UNCLASSIFIED floor, `authorize_read(roles, schema, clearance=...)` requires a clearance claim at or above the schema's classification floor; a missing or unknown clearance is denied (fail closed). The `insurer-aggregator` role is deliberately granted **only** the declassified ISR outcome aggregates (`isr_gold`, derived from `maritime.outcome.*` events) and can never read the raw or behavioural ISR tracks (`isr_bronze`/`isr_silver`), no matter what clearance it presents. Row-level filtering uses the persisted `record_classification` column: `clearance_permits(clearance, label)` is the predicate and `filter_records_by_clearance` withholds every row whose label is missing or unknown.
+
+Unknown roles, unknown schemas and empty claim sets are denied. No governance role can write; writes belong to governed service principals. This module is the platform-side policy of record: deployment must bind the same grants to Keycloak client scopes and storage-layer ACLs so the storage layer independently denies what the policy denies.
+
+### Export consignment traceability (Workstream E)
+
+`blueeconomy_data_platform.export_consignment` builds the fisheries gold-layer consignment view. `build_consignment_records` groups fisheries bronze events by `payload.consignmentId` — exactly one `fisheries.catch.*` event (species code, catch weight), the `fisheries.custody.*` transfer trail, `coldchain.*` temperature samples (range-validated, reduced to a tamper-evident SHA-256 digest of the ordered `(event_id, occurred_at, temperature_celsius)` samples) and the optional `export.*` declaration reference. `assemble_export_consignment_gold` rebuilds `<root>/fisheries/fisheries_gold/export_consignments` atomically from bronze under the declared `EXPORT_CONSIGNMENT_SCHEMA` (pyarrow). Assembly fails closed on missing/duplicate catch events, malformed consignment IDs, implausible temperatures or ungoverned event families, and only a fisheries-scope writer may assemble. Every assembled consignment carries a `record_classification` clearance floor equal to the most restrictive label among its source events — an unlabelled source defaults to SECRET, the highest restriction — and `read_export_consignments(writer, clearance)` is the serving read path: every row passes through `access_policy.filter_records_by_clearance`, so rows above the claimed clearance (or with missing/unknown labels) are withheld and a missing or unknown clearance claim is denied.
+
+### Gold-layer assembly and scheduling
+
+`blueeconomy-gold-assembly` is the scheduled orchestration entry point for the gold layer. One invocation runs one governed assembly pass for a single segregated scope, configured entirely through environment variables (fail closed on anything missing or invalid):
+
+| Variable | Requirement |
+|---|---|
+| `BLUEECONOMY_GOLD_SCOPE` | `cvff` runs the silver→gold ledger-commitment rollup; `fisheries` runs the export-consignment gold assembly plus the clearance-filtered export; `platform` runs the port-KPI statistics rollup (see below); `mrv` runs the MRV `vessel_annual` gold assembly; `bluecarbon` runs the `public_registry` projection. Any other scope fails closed. |
+| `BLUEECONOMY_GOLD_STATS_PERIOD` | Required for `platform`: the `YYYY-MM` computation period. |
+| `BLUEECONOMY_SIGNING_KEY_SEED` / `BLUEECONOMY_SIGNING_KID` | Required for `platform`: env-only Ed25519 report-signing key (64-hex or base64url seed) and kid; the run's JSON report artefact is signed under the envelope v1.0 JWS scheme. |
+| `BLUEECONOMY_GOLD_SCOPE_ROOT_URI` | The segregated scope root URI; `SegregatedDeltaWriter` enforces the scope boundary on it. |
+| `BLUEECONOMY_GOLD_REPORT` | Non-secret JSON run-report path (counts, table version, clearance; no payload data). |
+| `BLUEECONOMY_GOLD_EXPORT_PATH` | Required for `fisheries`: JSON export of the consignment rows visible at the configured clearance. |
+| `BLUEECONOMY_GOLD_CLEARANCE` | Optional clearance claim for the export read; defaults to `UNCLASSIFIED`, the most restrictive clearance, so an unconfigured run exports nothing above the UNCLASSIFIED floor. |
+
+```bash
+BLUEECONOMY_GOLD_SCOPE=fisheries \
+BLUEECONOMY_GOLD_SCOPE_ROOT_URI=s3://approved-lakehouse/fisheries \
+BLUEECONOMY_GOLD_REPORT=/approved/evidence/gold-assembly-report.json \
+BLUEECONOMY_GOLD_EXPORT_PATH=/approved/evidence/consignment-export.json \
+BLUEECONOMY_GOLD_CLEARANCE=RESTRICTED \
+blueeconomy-gold-assembly
+```
+
+Scheduling: run one invocation per scope on a bounded cadence, after the ingestion window closes. A cron entry (for example `*/15 * * * *` per scope with a per-scope lock) is sufficient for batch cadences; on the platform's Temporal deployment, model each scope as a scheduled workflow with a single activity per invocation — the command is idempotent (gold tables are atomically rebuilt derived state), so a retried or overlapping run never duplicates or corrupts gold content. The run report is the operations evidence for each scheduled pass.
+
+### Statistics Port: reproducible port KPIs (phase 8)
+
+`blueeconomy_data_platform.port_statistics` is the platform-scope gold rollup for port KPIs (vessel calls, turnaround, waiting time, berth occupancy, throughput, truck gate turnaround, booking lead time / slot utilisation, declaration clearance; UNCTAD lineage, definitions pinned in the `KPI_DEFINITIONS` registry). Core invariant: **no fabricated figures** — every value is computed by a batch run over the platform silver events table at a pinned Delta table version:
+
+- `platform_gold/port_kpi_runs` — provenance manifest, one append-only row per run: deterministic `run_id` (uuid5 over period + pinned source table versions + `query_definitions_sha256`), `computed_at`, `source_table_versions_json`, `report_sha256`.
+- `platform_gold/port_kpi_values` — one row per KPI × period × port × segment. **No-data rows are first class**: a KPI with zero observations is emitted with `value=null` and a coverage note (`no source events in period`), never omitted and never filled with estimates, samples or seed values. KPIs whose upstream feed does not yet exist ship as gap rows citing `STATS_GAPS` (`GAP-STATS-BERTH-REF`, `GAP-STATS-TEU`, `GAP-STATS-SW-EVENTS`).
+- `platform_gold/port_call_facts` — the silver-derived per-call fact table feeding the KPIs (vessel identity hashed).
+- `platform_gold/port_kpi_reports/<run_id>.{json,csv}` — the signed per-run report artefact (envelope v1.0 JWS-EdDSA scheme; `report_sha256` over the JCS-canonical report core, which excludes wall-clock fields so identical inputs reproduce identical hashes).
+
+Determinism/replay: the same platform silver table version + period + pinned definitions always reproduces the same `run_id` and `report_sha256`, and replay merges idempotently (covered by a dedicated test).
+
+`blueeconomy-stats-api` (`stats_api.py`) is the read-only serving layer: `GET /v1/stats/health` (liveness), `/v1/stats/kpis` (registry), `/v1/stats/runs` (provenance ledger), `/v1/stats/values?kpi_id=&port_code=&period=` (exact precomputed gold rows, always with `run_id` + `source_table_versions`; it never computes aggregates at request time) and `/v1/stats/report/{run_id}?format=json|csv` (the exact signed artefact). Env-only, fail-closed configuration: `STATS_API_TABLE_ROOT`, `STATS_API_PORT`, `STATS_API_BEARER_TOKEN_SECRET` (HS256 gateway-token pattern; data routes require the `stats-reader` role claim). Missing or malformed inputs fail closed with 401/403/400; missing gold tables return a truthful 503, never an empty success.
+
+### Cloud-agnostic storage configuration
+
+The platform is not Azure-locked. `blueeconomy_data_platform.storage` is the only module containing cloud specifics; segregation, medallion and access layers consume resolved URIs and never branch on a provider. Lakehouse roots are resolved from the environment only; no endpoint, account, bucket or credential is hardcoded. `resolve_lakehouse_root` fails closed unless configuration is complete:
+
+| Variable | Requirement |
+|---|---|
+| `BLUEECONOMY_STORAGE_BACKEND` | `adls`, `s3`, or `local-gated` (the latter only behind the explicit `BLUEECONOMY_ALLOW_LOCAL_STORAGE=true` development gate). The historical values `adls-gen2` and `local` remain accepted as aliases. |
+| `BLUEECONOMY_AZURE_CLOUD` | ADLS only: `AzureUSGovernment` (endpoint suffix `dfs.core.usgovcloudapi.net`) for the CVFF deployment, or `AzureCloud`. No other cloud is accepted. |
+| `BLUEECONOMY_STORAGE_ACCOUNT` | ADLS only: ADLS Gen2 account name (3–24 lowercase alphanumeric). |
+| `BLUEECONOMY_STORAGE_FILESYSTEM` | ADLS only: ADLS Gen2 filesystem (container) name. |
+| `BLUEECONOMY_S3_BUCKET` | S3 only: bucket name (3–63 lowercase letters/digits/dots/hyphens, no IP-address form, no consecutive dots). |
+| `BLUEECONOMY_S3_REGION` | S3 only: region identifier such as `us-east-1` or `us-gov-west-1`. |
+| `BLUEECONOMY_S3_ENDPOINT_URL` | S3 only, optional: custom endpoint for MinIO/Ceph/GCS-interop, e.g. `https://minio.storage.example:9000`. No credentials, path or query allowed; the scheme must match `BLUEECONOMY_S3_SECURE`. |
+| `BLUEECONOMY_S3_SECURE` | S3 only: exactly `true` or `false`. `false` (plain HTTP) is permitted only against an explicit custom endpoint; AWS S3 transport is always TLS. |
+| `BLUEECONOMY_LOCAL_LAKEHOUSE_ROOT` | Absolute path; required only for the gated local backend. |
+
+Resolved URIs are `abfs://<filesystem>@<account>.<cloud-suffix>/<scope>` for ADLS and `s3://<bucket>/<scope>` for S3-compatible storage. Credentials are never embedded in URIs and never returned by the storage module; authentication is environment-injected at deployment (managed/workload identity against `login.microsoftonline.us` for ADLS; the standard `AWS_*` credential chain for S3-compatible backends). `resolve_storage_options` maps the validated configuration to non-secret deltalake/object_store options (`AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`) so writers stay provider-neutral, and `validate_s3_uri` enforces bucket/key rules (fail closed on embedded credentials, empty or `..` segments, control characters).
+
+#### Neutral reference deployment: MinIO on any Kubernetes
+
+The cloud-neutral reference deployment runs [MinIO](https://min.io/) (or any S3-compatible service — Ceph RGW, GCS with S3 interoperability, AWS S3) on any Kubernetes cluster:
+
+1. Deploy MinIO (operator or Helm chart) with TLS enabled; create one bucket per environment (e.g. `blueeconomy-lakehouse`) and one IAM policy per scope prefix (`cvff/*`, `platform/*`, `seafarer/*`, `fisheries/*`, `isr/*`) bound to per-scope service accounts.
+2. Inject credentials through Kubernetes Secrets into the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` environment variables of the ingestion workloads — never into URIs, ConfigMaps or images.
+3. Configure the workloads with `BLUEECONOMY_STORAGE_BACKEND=s3`, `BLUEECONOMY_S3_BUCKET`, `BLUEECONOMY_S3_REGION` (MinIO conventionally `us-east-1`), `BLUEECONOMY_S3_ENDPOINT_URL=https://<minio-service>:9000` and `BLUEECONOMY_S3_SECURE=true`.
+4. The same binaries run unchanged on AWS GovCloud S3 (drop the endpoint variable), Azure Government ADLS Gen2 (`BLUEECONOMY_STORAGE_BACKEND=adls` with the Azure coordinates above) or the gated local backend for conformance runs. Azure Government deployment additionally requires an approved ADLS Gen2 account in the US Gov region, Keycloak role bindings matching the table above, and per-scope ACLs on the scope roots.
+
+### Dead-letter quarantine (Gap #45)
+
+Poison Kafka messages must never halt the pipeline and must never be silently dropped. `blueeconomy_data_platform.dlq` implements the mandatory dead-letter path shared by `blueeconomy-ingest-kafka` and `blueeconomy-ingest-vessels`: a message that fails schema validation, signature verification or batch-level duplicate checks is quarantined — the verbatim bytes are wrapped in a `blueeconomy.lakehouse.dlq-record.v1` envelope (reason code, bounded error detail, source topic/partition/offset, payload SHA-256, consumer-group reference, quarantine timestamp), produced to the scope's DLQ topic and appended to an append-only Delta quarantine table. Only after **both** quarantine writes succeed does the poisoned offset join the commit set; if either fails the run halts without committing (fail closed, safe replay). Broker-level errors still halt the run — they are not message poison. Both consumers require `--dlq-topic` and `--dlq-table-uri`; the DLQ topic must live in the consumed scope's namespace and the quarantine table inside the scope root. The ingestion report (`...kafka-ingestion-report.v2`) carries `messages_quarantined` and per-reason counts.
+
+### Vessel lakehouse path (bronze.vessel_observations → silver.vessel_trajectories)
+
+The geo-service writes signed envelope v1.0 events of type `vessels.observation.v1` to the `vessels.events` topic (platform scope; `vessels.` is a governed platform namespace). `blueeconomy-ingest-vessels` consumes them into `bronze/vessel_observations` with the same fail-closed contract as the other consumers (schema validation, JWS-EdDSA/JCS provenance verification, mandatory DLQ, commit-after-write). Payloads carrying raw `nmeaSentences` are decoded with the pinned `pyais` library (`blueeconomy_data_platform.ais_decode`, NMEA checksum enforced); aisstream-style decoded JSON payloads bypass AIS decoding. A payload whose stated coordinates disagree with the decoded AIS position is rejected.
+
+`blueeconomy_data_platform.vessel_lakehouse` assembles `silver/vessel_trajectories` from bronze: per-MMSI tracks ordered by `(occurred_at, event_id)`, segmented on time gaps greater than two hours, rendered as EPSG:4326 WKT (ST_MakeLine-equivalent, longitude/latitude axis order) and simplified with an ST_SimplifyPreserveTopology-equivalent Ramer-Douglas-Peucker pass guarded by a self-intersection check (tolerance halving, never returning a self-crossing line). Every silver row carries its source event-id range and quality metrics for lineage. `gold/geofence_summaries` aggregates bronze observations per geofence per MMSI using the governed geofence evaluator. Both tables are atomically rebuilt derived state, so replays are idempotent.
+
+The governed batch path is the Apache Sedona job [`jobs/vessel_trajectory_silver.py`](jobs/vessel_trajectory_silver.py), deployed through the `sedona-spark-jobs` gitops chart (`mainApplicationFile: local:///opt/blueeco/jobs/vessel_trajectory_silver.py`; input `bronze.vessel_observations`; output `silver.vessel_trajectories`; CRS EPSG:4326). Sedona remains batch-only; PostGIS 3.3 stays the geo hot path. The job has three engines: `spark` (Sedona SQL: `ST_Point`/`ST_MakeLine` over deterministically ordered points, `ST_SimplifyPreserveTopology`, window-based gap segmentation — exits non-zero with a clear message when Spark/Sedona is unavailable, never a fake stub), `python` (the bounded pure-Python reference path for small backfills, capped by `--max-python-points`), and `auto` (Spark when importable, otherwise the bounded Python path).
+
+### GeoParquet export
+
+`blueeconomy_data_platform.geoparquet_export` exports silver trajectories and gold geofence summaries as GeoParquet 1.0 (WKB geometry encoding, GeoParquet default CRS OGC:CRS84 — the WGS84 longitude/latitude default matching the EPSG:4326 pipeline datum) through the same `storage.py` backend abstraction (`s3`, `adls`, or the explicitly gated `local-gated` backend; credentials are resolved from the ambient environment, never from URIs). Every export embeds lineage metadata in the Parquet schema metadata and a `.lineage.json` sidecar: input table reference and version, input event-id range, row count and quality metrics (`blueeconomy.lakehouse.geoparquet-lineage.v1`).
+
+### Retention enforcement (Gap #46)
+
+`blueeconomy-retention-enforce` applies the fiduciary metadata retention policy (default 30 days hot / 7 years cold, bounds-validated by `medallion.RetentionPolicy`) to governed Delta tables:
+
+- **Dry-run by default**: without `--apply` the job only classifies rows, plans date-windowed (partition-aware) deletion batches and records the plan in the append-only audit table (`--audit-table-uri`, mandatory).
+- **`--apply`**: re-validates every deletion batch against the policy in-process (a row is deleted only when its age is strictly beyond the cold horizon — out-of-policy deletion is a hard error), deletes each batch with post-deletion count verification, and restores `delta.appendOnly=true` in a `finally` block after the exceptional deletion protocol.
+- **Tiering**: with `--archive-uri`, cold-tier rows are first copied to the archive table (idempotent insert-only merge); cold rows are never deleted.
+- **Audit log**: every planned or executed batch is appended to the audit table with policy, counts, window, operator identity (`--operator` or `BLUEECONOMY_RETENTION_OPERATOR`, mandatory) and a dry-run flag.
+
+```bash
+blueeconomy-retention-enforce \
+  --table-uri /approved/lakehouse/platform/platform_bronze/events \
+  --audit-table-uri /approved/lakehouse/platform/audit/retention_audit \
+  --archive-uri /approved/lakehouse/platform/archive/events_cold \
+  --operator retention-bot --report /approved/evidence/retention-report.json
+# add --apply to execute
+```
+
+### Movement analytics (Phase 5, geolibre-wasm)
+
+`blueeconomy_data_platform.movement_analytics` wraps the pinned `geolibre-wasm` Python binding, which runs the GeoLibre WASI tool suite in-process: `reconstruct_tracks` (per-MMSI track reconstruction with gap segmentation), `calculate_motion_statistics` (per-point speed/acceleration/bearing/distance annotation) and `trace_proximity_events` (time-bounded proximity events between movers). Fail-closed contract: when the binding or the WASI runtime is unavailable the wrappers raise `MOVEMENT_ENGINE_UNAVAILABLE` — there is no silent fallback to approximated results. Production paths must vendor the `geolibre-cli.wasm` runtime via the `GEOLIBRE_WASM` environment variable (or pre-seeded binding cache); a one-time download is permitted only in development behind `BLUEECONOMY_MOVEMENT_ALLOW_RUNTIME_DOWNLOAD=true`. The engine is validated at resolution time (WASM magic plus required tool ids), not at first use.
+
+### Production image (Gap #4)
+
+The [`Dockerfile`](Dockerfile) builds the production data-platform image: hash-locked install of `requirements.lock`, the package, schemas and `jobs/` (including the Sedona `mainApplicationFile`), an unprivileged `blueeconomy` user (uid/gid 10001), and the `GEOLIBRE_WASM` vendoring path preconfigured. The base image tag is pinned with a comment (registry digest was not resolvable from the authoring environment; pin `python:3.12-slim@sha256:<digest>` at the next governed dependency review). Build and run:
+
+```bash
+docker build -t blueeconomy-data-platform:local .
+docker run --rm blueeconomy-data-platform:local --help                      # Kafka consumer entrypoint
+docker run --rm --entrypoint blueeconomy-gold-assembly blueeconomy-data-platform:local
+docker run --rm --entrypoint blueeconomy-ingest-vessels blueeconomy-data-platform:local --help
+docker run --rm --entrypoint blueeconomy-retention-enforce blueeconomy-data-platform:local --help
+```
+
+### Segregation runbook
+
+1. Provision one filesystem/bucket per environment on the selected backend; apply deny-all default ACLs, then grant each scope's writer service principal access to its own root only (`/cvff/**`, `/platform/**`, `/seafarer/**`, `/fisheries/**`, `/isr/**`).
+2. Create Kafka topics under the governed namespaces (`cvff.*`, `ports.*`, `ferries.*`, `vessels.*`, `seafarer.*`, `fisheries.*`, `coldchain.*`, `export.*`, `maritime.isr.*`, `maritime.behaviour.*`, `maritime.outcome.*`) with ACLs that let each consumer group subscribe only to its scope's namespace, plus a `<namespace>.dlq` dead-letter topic per consumed namespace.
+3. Run consumers with the matching scope, e.g. `blueeconomy-ingest-kafka --lakehouse-scope cvff --topic cvff.ledger.commitments --table-uri <cvff bronze URI> ...`. A scope/topic/table/classification mismatch aborts before any write.
+4. Promote bronze→silver with `medallion.build_silver_record` + `medallion.append_silver`; replays are idempotent on the dedup key. Rebuild gold with `medallion.curate_gold`.
+5. Retention: evaluate `medallion.retention_report` daily. Move `cold` records to the archive tier per the retention policy; `expired` records require legal-hold review before deletion. Bronze/silver tables are append-only; deletions are exceptional, evidence-recorded operations.
+6. Grant auditor/NIMASA/CBN read access by assigning the Keycloak roles above; verify with `access_policy.authorize_read` before issuing credentials, and confirm ADLS ACLs independently deny cross-scope reads.

@@ -1,63 +1,124 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/munisp/blueeconomy-contracts/schemas/event-envelope.schema.json",
-  "title": "Blue Economy Lakehouse Event Envelope",
+  "$id": "https://github.com/munisp/blueeconomy-data-platform/schemas/event-envelope.schema.json",
+  "title": "Blue Economy Platform Event Envelope",
+  "description": "Canonical platform event envelope (blueeconomy.contracts.v1.EventEnvelope, JSON rendering) as emitted by every governed producer on the platform Kafka topics.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "event_id",
-    "event_type",
+    "envelopeVersion",
+    "eventId",
+    "eventType",
+    "occurredAt",
     "producer",
-    "occurred_at",
-    "recorded_at",
-    "data_classification",
-    "source_system",
-    "source_record_reference",
-    "payload"
+    "correlationId",
+    "fhir",
+    "provenance",
+    "classification"
   ],
   "properties": {
-    "event_id": {
+    "envelopeVersion": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 256
+      "const": "1.0"
     },
-    "event_type": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "eventType": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_.-]{2,127}$"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
     },
     "producer": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256
     },
-    "occurred_at": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "recorded_at": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "data_classification": {
-      "type": "string",
-      "enum": ["public", "internal", "confidential", "restricted", "highly_restricted"]
-    },
-    "source_system": {
+    "correlationId": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256
     },
-    "source_record_reference": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 512
+    "fhir": {
+      "type": "object",
+      "description": "FHIR R4 message Bundle whose first entry carries the primary domain resource for the event.",
+      "required": ["resourceType", "type", "entry"],
+      "properties": {
+        "resourceType": {
+          "type": "string",
+          "const": "Bundle"
+        },
+        "type": {
+          "type": "string",
+          "const": "message"
+        },
+        "entry": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["resource"],
+            "properties": {
+              "resource": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
     },
-    "correlation_id": {
-      "type": "string",
-      "maxLength": 256
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principalId", "principalRole", "signature", "ledgerCommitHash"],
+      "properties": {
+        "principalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "principalRole": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "signature": {
+          "type": "string",
+          "description": "Fleet provenance signature: JWS compact serialization (EdDSA/Ed25519) over the JCS-canonicalized (RFC 8785) JSON of the full envelope excluding this field; protected header {\"alg\":\"EdDSA\",\"kid\":\"<producer>-<epoch>\"}. Verified against the mounted key directory (KEY_DIRECTORY_PATH); see blueeconomy-contracts docs/envelope-signature.md.",
+          "minLength": 1,
+          "maxLength": 2097152,
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+        },
+        "ledgerCommitHash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
     },
-    "payload": {
-      "type": "object"
+    "classification": {
+      "type": "string",
+      "enum": [
+        "FIDUCIARY_SEGREGATED",
+        "CONFIDENTIAL",
+        "RESTRICTED",
+        "INTERNAL",
+        "PUBLIC"
+      ]
+    },
+    "recordClassification": {
+      "type": "string",
+      "description": "Optional per-record clearance label persisted as a column for row-level filtering; mandatory for isr scope records.",
+      "enum": [
+        "UNCLASSIFIED",
+        "RESTRICTED",
+        "CONFIDENTIAL",
+        "SECRET"
+      ]
     }
   }
 }
