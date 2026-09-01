@@ -1,0 +1,21 @@
+{
+  "database": "deltalake:/home/kimi/lakehouse-demo",
+  "exemptions": {},
+  "second_run_noop": {
+    "cvff_bronze_present": 4,
+    "cvff_silver_present": 4,
+    "platform_bronze_present": 4,
+    "platform_silver_present": 4
+  },
+  "table_count": 6,
+  "tables": {
+    "cvff_bronze": 4,
+    "cvff_gold": 4,
+    "cvff_silver": 4,
+    "platform_bronze": 4,
+    "platform_gold_excise_stamp_facts": 4,
+    "platform_silver": 4
+  },
+  "total_rows": 24,
+  "unjustified_empty_tables": []
+}

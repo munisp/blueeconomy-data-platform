@@ -12,3 +12,4 @@ build/
 !.env.example
 integration/*/results/*
 !integration/*/results/.gitkeep
+lakehouse-demo/
