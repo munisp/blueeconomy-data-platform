@@ -25,6 +25,7 @@ from deltalake.exceptions import CommitFailedError, TableNotFoundError
 from jsonschema import Draft202012Validator, FormatChecker
 
 from blueeconomy_data_platform.segregation import map_canonical_classification
+from blueeconomy_data_platform.storage import resolve_storage_options_for_client
 
 MAX_RECORDS_PER_BATCH = 100_000
 MAX_INPUT_BYTES = 256 * 1024 * 1024
@@ -321,7 +322,7 @@ def has_control_characters(value: str) -> bool:
 
 def delta_table_exists(table_uri: str) -> bool:
     try:
-        DeltaTable(table_uri, without_files=True)
+        DeltaTable(table_uri, without_files=True, storage_options=resolve_storage_options_for_client())
     except TableNotFoundError:
         return False
     return True
@@ -460,11 +461,12 @@ def append_rows(
             name=table_name,
             description=description,
             configuration={"delta.appendOnly": "true"},
+            storage_options=resolve_storage_options_for_client(),
         )
-        return DeltaTable(table_uri).version(), len(rows), 0
+        return DeltaTable(table_uri, storage_options=resolve_storage_options_for_client()).version(), len(rows), 0
 
     for attempt in range(1, MAX_COMMIT_ATTEMPTS + 1):
-        table = DeltaTable(table_uri)
+        table = DeltaTable(table_uri, storage_options=resolve_storage_options_for_client())
         if table.metadata().configuration.get("delta.appendOnly") != "true":
             raise ValueError("existing Delta table is not configured with delta.appendOnly=true")
         reject_conflicting_replays(table, rows, key_column)
@@ -480,7 +482,7 @@ def append_rows(
                 .execute()
             )
             records_written = int(metrics["num_target_rows_inserted"])
-            retained = DeltaTable(table_uri)
+            retained = DeltaTable(table_uri, storage_options=resolve_storage_options_for_client())
             reject_conflicting_replays(retained, rows, key_column)
             return (
                 retained.version(),

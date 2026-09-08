@@ -211,8 +211,10 @@ class DeadLetterQueue:
         from deltalake import DeltaTable
         from deltalake.exceptions import TableNotFoundError
 
+        from blueeconomy_data_platform.storage import resolve_storage_options_for_client
+
         try:
-            table = DeltaTable(self.quarantine_table_uri)
+            table = DeltaTable(self.quarantine_table_uri, storage_options=resolve_storage_options_for_client())
         except TableNotFoundError:
             return False
         existing = table.to_pyarrow_table(

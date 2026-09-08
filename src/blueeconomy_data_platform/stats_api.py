@@ -48,6 +48,7 @@ from blueeconomy_data_platform.port_statistics import (
     VALUES_TABLE_NAME,
 )
 from blueeconomy_data_platform.segregation import LakehouseScope, require_scope_table_uri
+from blueeconomy_data_platform.storage import resolve_storage_options_for_client
 
 ENV_TABLE_ROOT = "STATS_API_TABLE_ROOT"
 ENV_PORT = "STATS_API_PORT"
@@ -163,7 +164,7 @@ def authenticate(config: StatsApiConfig, authorization: str | None) -> None:
 
 def _read_gold_table(config: StatsApiConfig, name: str) -> list[dict[str, Any]]:
     try:
-        table = DeltaTable(config.table_uri(name))
+        table = DeltaTable(config.table_uri(name), storage_options=resolve_storage_options_for_client())
     except TableNotFoundError:
         raise StatsApiError(
             HTTPStatus.SERVICE_UNAVAILABLE,
