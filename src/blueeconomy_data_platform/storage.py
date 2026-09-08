@@ -309,3 +309,29 @@ def resolve_storage_options(env: Mapping[str, str] | None = None) -> dict[str, s
         return {}
     load_local_root(environment)
     return {}
+
+
+def resolve_storage_options_for_client(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``resolve_storage_options`` for wiring into a deltalake client call site.
+
+    Every ``DeltaTable``/``write_deltalake`` call in this codebase was
+    previously omitting ``storage_options`` entirely (confirmed by reading
+    every call site: ``ingest.py``, ``dlq.py``, ``medallion.py``,
+    ``vessel_lakehouse.py``, ``stats_api.py``), so the S3/MinIO reference
+    deployment this README documents could never actually reach a
+    non-AWS-default endpoint - it silently fell through to real AWS S3.
+    ``resolve_storage_options`` itself fails closed when
+    ``BLUEECONOMY_STORAGE_BACKEND`` is unset, which is correct for the
+    boundary-facing config resolvers (``resolve_lakehouse_root`` and
+    friends) but would also break every existing local-path test fixture
+    that calls a Delta client function directly against a bare temp-dir
+    path with no backend env configured at all. This wrapper preserves the
+    original (pre-fix) no-options behavior when the backend is unset - a
+    plain local filesystem path needs no options - and only resolves real
+    options once a backend is actually configured, which is always true in
+    a real deployment.
+    """
+    environment = os.environ if env is None else env
+    if not environment.get(ENV_BACKEND, ""):
+        return {}
+    return resolve_storage_options(environment)
